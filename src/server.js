@@ -18,9 +18,8 @@ async function main() {
     throw err;
   });
 
-  server.listen(PORT, () => {
-    
-    console.log(`API listening on http://localhost:${PORT}`);
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`API listening on http://localhost:${PORT} (all interfaces; emulator: http://10.0.2.2:${PORT})`);
   });
 }
 

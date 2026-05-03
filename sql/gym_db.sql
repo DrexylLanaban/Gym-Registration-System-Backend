@@ -1,12 +1,15 @@
 CREATE DATABASE IF NOT EXISTS gym_db;
 USE gym_db;
 
--- Users (Admin/Staff for Login)
+-- Users (Admin/Staff for Login + registration from mobile app)
 CREATE TABLE IF NOT EXISTS users (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    username VARCHAR(50) UNIQUE NOT NULL,
+    username VARCHAR(255) UNIQUE NOT NULL,
     password VARCHAR(255) NOT NULL,
-    email VARCHAR(100)
+    email VARCHAR(255),
+    name VARCHAR(100),
+    phone VARCHAR(20),
+    role VARCHAR(20) DEFAULT 'staff'
 );
 
 -- Members
