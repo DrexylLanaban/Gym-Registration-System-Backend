@@ -34,7 +34,7 @@ gymApiRouter.post("/login", async (req, res, next) => {
 /** GET /api/members — MemberListActivity */
 gymApiRouter.get("/members", async (req, res, next) => {
   try {
-    const [results] = await db.query("SELECT * FROM members");
+    const [results] = await db.query("SELECT * FROM members ORDER BY id");
     return res.json(results);
   } catch (err) {
     return next(err);
@@ -75,7 +75,8 @@ gymApiRouter.get("/payments", async (req, res, next) => {
     const [results] = await db.query(
       `SELECT payments.*, members.full_name
        FROM payments
-       JOIN members ON payments.member_id = members.id`
+       JOIN members ON payments.member_id = members.id
+       ORDER BY payments.id`
     );
     return res.json(results);
   } catch (err) {
@@ -86,7 +87,7 @@ gymApiRouter.get("/payments", async (req, res, next) => {
 /** GET /api/trainers — TrainerListActivity */
 gymApiRouter.get("/trainers", async (req, res, next) => {
   try {
-    const [results] = await db.query("SELECT * FROM trainers");
+    const [results] = await db.query("SELECT * FROM trainers ORDER BY id");
     return res.json(results);
   } catch (err) {
     return next(err);
