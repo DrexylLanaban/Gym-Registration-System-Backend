@@ -1,10 +1,4 @@
-# Render Web Service only — MySQL is hosted elsewhere (e.g. InfinityFree).
-# In Render → Environment, set: DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
-#
-# InfinityFree: enable "Remote MySQL" / allowed hosts if the control panel requires it,
-# so Render can connect (you may need to allow % or your host's instructions).
-
-services:
+gitservices:
   - type: web
     name: gym-registration-system-backend
     runtime: node
