@@ -1,4 +1,4 @@
-dconst express = require("express");
+const express = require("express");
 const { db } = require("../services/db");
 
 const healthRouter = express.Router();
