@@ -597,7 +597,7 @@ gymApiRouter.post("/workout-schedules", async (req, res, next) => {
 });
 
 /** GET /api/members — MemberListActivity */
-gymApiRouter.get("/members", async (req, res, next) => {
+gymApiRouter.get("/members", (req, res) => {
   try {
     const search = req.query.search != null ? String(req.query.search).trim() : "";
     const status = req.query.status != null ? String(req.query.status).trim() : "";
@@ -606,17 +606,7 @@ gymApiRouter.get("/members", async (req, res, next) => {
     const offset = (page - 1) * limit;
 
     // Simple query that works with current database structure
-    let sql = `
-      SELECT 
-        m.*,
-        u.profile_photo,
-        'NO MONTHLY PLAN' as display_status,
-        'NO MONTHLY PLAN' as current_plan_name,
-        0 as current_plan_price,
-        0 as remaining_days
-      FROM members m
-      LEFT JOIN users u ON u.member_id = m.id
-    `;
+    let sql = "SELECT m.*, u.profile_photo FROM members m LEFT JOIN users u ON u.member_id = m.id";
     const params = [];
 
     if (search) {
@@ -628,15 +618,11 @@ gymApiRouter.get("/members", async (req, res, next) => {
     // Apply status filter if specified
     if (status && status !== 'all') {
       if (status === 'active') {
-        // For now, return empty since no active memberships exist
-        sql += " AND 1=0";
-      } else if (status === 'inactive') {
-        // Show all members as inactive for now
-        sql += " AND 1=1";
+        sql += " AND 1=0"; // Return empty for now
       } else if (status === 'expired') {
-        // For now, return empty since no expired memberships exist
-        sql += " AND 1=0";
+        sql += " AND 1=0"; // Return empty for now
       }
+      // For 'inactive' or 'all', show all members
     }
 
     sql += " ORDER BY m.id DESC LIMIT ? OFFSET ?";
@@ -645,11 +631,7 @@ gymApiRouter.get("/members", async (req, res, next) => {
     const [results] = await db.query(sql, params);
 
     // Simple count query
-    let countSql = `
-      SELECT COUNT(*) as total 
-      FROM members m
-      LEFT JOIN users u ON u.member_id = m.id
-    `;
+    let countSql = "SELECT COUNT(*) as total FROM members m LEFT JOIN users u ON u.member_id = m.id";
     const countParams = [];
     
     if (search) {
@@ -660,7 +642,7 @@ gymApiRouter.get("/members", async (req, res, next) => {
     
     if (status && status !== 'all') {
       if (status === 'active' || status === 'expired') {
-        countSql += " AND 1=0"; // Return empty for active/expired for now
+        countSql += " AND 1=0"; // Return empty for now
       }
     }
 
@@ -674,12 +656,12 @@ gymApiRouter.get("/members", async (req, res, next) => {
         full_name: member.full_name || "",
         phone: member.phone || "",
         email: member.email || "",
-        status: member.display_status || "NO MONTHLY PLAN",
+        status: "NO MONTHLY PLAN", // All members start as inactive
         membership_end: null,
         registration_date: member.registration_date,
         profile_photo: member.profile_photo || "",
-        current_plan: member.current_plan_name || "NO MONTHLY PLAN",
-        remaining_days: member.remaining_days || 0,
+        current_plan: "NO MONTHLY PLAN",
+        remaining_days: 0,
         created_at: member.created_at,
         updated_at: member.updated_at
       })),
@@ -693,7 +675,7 @@ gymApiRouter.get("/members", async (req, res, next) => {
     });
   } catch (err) {
     console.error('Members endpoint error:', err);
-    return next(err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
