@@ -1,8 +1,10 @@
 const express = require("express");
+const multer = require("multer");
 const { db } = require("../services/db");
 const { handleAuthLogin, handleAuthRegister } = require("./auth");
 
 const gymApiRouter = express.Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 /** POST /api/login — ApiService: api/login (email or username + password, ApiResponse shape) */
 gymApiRouter.post("/login", handleAuthLogin);
@@ -148,6 +150,121 @@ gymApiRouter.get("/trainers", async (req, res, next) => {
   try {
     const [results] = await db.query("SELECT * FROM trainers ORDER BY id");
     return res.json(results);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/** GET /api/get_trainer?id= */
+gymApiRouter.get("/get_trainer", async (req, res, next) => {
+  try {
+    const id = Number(req.query.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: "id query parameter required" });
+    }
+    const [rows] = await db.query("SELECT * FROM trainers WHERE id = ?", [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Trainer not found" });
+    }
+    return res.json({ success: true, data: rows[0] });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/** POST /api/add_trainer */
+gymApiRouter.post("/add_trainer", async (req, res, next) => {
+  try {
+    const payload = req.body || {};
+    const firstName = payload.first_name != null ? String(payload.first_name).trim() : "";
+    const lastName = payload.last_name != null ? String(payload.last_name).trim() : "";
+    const fullNameRaw = payload.full_name != null ? String(payload.full_name).trim() : "";
+    const fullName = fullNameRaw || [firstName, lastName].filter(Boolean).join(" ").trim();
+    if (!fullName) {
+      return res.status(400).json({ success: false, message: "full_name (or first_name/last_name) required" });
+    }
+
+    const phone = payload.phone != null && String(payload.phone).trim() ? String(payload.phone).trim() : null;
+    const email = payload.email != null && String(payload.email).trim() ? String(payload.email).trim().toLowerCase() : null;
+    const specialization = payload.specialization != null ? String(payload.specialization).trim() : null;
+    const profilePhoto = payload.image_url != null ? String(payload.image_url).trim() : null;
+
+    const [result] = await db.query(
+      "INSERT INTO trainers (full_name, phone, email, specialization, profile_photo) VALUES (?, ?, ?, ?, ?)",
+      [fullName, phone, email, specialization, profilePhoto]
+    );
+
+    const [rows] = await db.query("SELECT * FROM trainers WHERE id = ?", [result.insertId]);
+    return res.status(201).json({ success: true, data: rows[0], message: "Trainer added successfully" });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/** POST /api/update_trainer?id= */
+gymApiRouter.post("/update_trainer", async (req, res, next) => {
+  try {
+    const id = Number(req.query.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: "id query parameter required" });
+    }
+    const payload = req.body || {};
+    const firstName = payload.first_name != null ? String(payload.first_name).trim() : "";
+    const lastName = payload.last_name != null ? String(payload.last_name).trim() : "";
+    const fullNameRaw = payload.full_name != null ? String(payload.full_name).trim() : "";
+    const fullName = fullNameRaw || [firstName, lastName].filter(Boolean).join(" ").trim();
+    if (!fullName) {
+      return res.status(400).json({ success: false, message: "full_name (or first_name/last_name) required" });
+    }
+
+    const phone = payload.phone != null && String(payload.phone).trim() ? String(payload.phone).trim() : null;
+    const email = payload.email != null && String(payload.email).trim() ? String(payload.email).trim().toLowerCase() : null;
+    const specialization = payload.specialization != null ? String(payload.specialization).trim() : null;
+    const profilePhoto = payload.image_url != null ? String(payload.image_url).trim() : undefined;
+
+    if (profilePhoto !== undefined) {
+      await db.query(
+        "UPDATE trainers SET full_name = ?, phone = ?, email = ?, specialization = ?, profile_photo = ? WHERE id = ?",
+        [fullName, phone, email, specialization, profilePhoto, id]
+      );
+    } else {
+      await db.query(
+        "UPDATE trainers SET full_name = ?, phone = ?, email = ?, specialization = ? WHERE id = ?",
+        [fullName, phone, email, specialization, id]
+      );
+    }
+
+    const [rows] = await db.query("SELECT * FROM trainers WHERE id = ?", [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Trainer not found" });
+    }
+    return res.json({ success: true, data: rows[0], message: "Trainer updated successfully" });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/** POST /api/upload_trainer_photo?id= */
+gymApiRouter.post("/upload_trainer_photo", upload.single("photo"), async (req, res, next) => {
+  try {
+    const id = Number(req.query.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: "id query parameter required" });
+    }
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "photo file is required" });
+    }
+
+    const mime = req.file.mimetype || "image/jpeg";
+    const base64 = req.file.buffer.toString("base64");
+    const dataUrl = `data:${mime};base64,${base64}`;
+    await db.query("UPDATE trainers SET profile_photo = ? WHERE id = ?", [dataUrl, id]);
+
+    const [rows] = await db.query("SELECT * FROM trainers WHERE id = ?", [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Trainer not found" });
+    }
+    return res.json({ success: true, data: rows[0], message: "Trainer photo uploaded successfully" });
   } catch (err) {
     return next(err);
   }
