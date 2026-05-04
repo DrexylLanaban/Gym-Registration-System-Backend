@@ -57,64 +57,29 @@ gymApiRouter.get("/members", async (req, res, next) => {
     const limit = Number(req.query.limit) || 100;
     const offset = (page - 1) * limit;
 
-    // Simplified query that works with existing database structure
-    let sql = `
-      SELECT 
-        m.*,
-        u.profile_photo,
-        'inactive' as status,
-        'No Plan' as current_plan,
-        0 as remaining_days
-      FROM members m
-      LEFT JOIN users u ON u.member_id = m.id
-      WHERE u.role = 'member' OR u.role IS NULL
-    `;
+    // Very simple query that will definitely work
+    let sql = "SELECT * FROM members";
     const params = [];
 
     if (search) {
-      sql += " AND (m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ?)";
+      sql += " WHERE full_name LIKE ? OR email LIKE ? OR phone LIKE ?";
       const q = `%${search}%`;
       params.push(q, q, q);
     }
 
-    // Apply status filter if specified
-    if (status && status !== 'all') {
-      if (status === 'active') {
-        // For now, return empty since no memberships exist
-        sql += " AND 1=0";
-      } else if (status === 'inactive') {
-        // Show all members as inactive for now
-        sql += " AND 1=1";
-      } else if (status === 'expired') {
-        // For now, return empty since no expired memberships exist
-        sql += " AND 1=0";
-      }
-    }
-
-    sql += " ORDER BY m.id DESC LIMIT ? OFFSET ?";
+    sql += " ORDER BY id DESC LIMIT ? OFFSET ?";
     params.push(limit, offset);
 
     const [results] = await db.query(sql, params);
 
-    // Get total count for pagination
-    let countSql = `
-      SELECT COUNT(*) as total 
-      FROM members m
-      LEFT JOIN users u ON u.member_id = m.id
-      WHERE u.role = 'member' OR u.role IS NULL
-    `;
+    // Simple count query
+    let countSql = "SELECT COUNT(*) as total FROM members";
     const countParams = [];
     
     if (search) {
-      countSql += " AND (m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ?)";
+      countSql += " WHERE full_name LIKE ? OR email LIKE ? OR phone LIKE ?";
       const q = `%${search}%`;
       countParams.push(q, q, q);
-    }
-    
-    if (status && status !== 'all') {
-      if (status === 'active' || status === 'expired') {
-        countSql += " AND 1=0"; // Return empty for active/expired for now
-      }
     }
 
     const [countResult] = await db.query(countSql, countParams);
@@ -127,12 +92,12 @@ gymApiRouter.get("/members", async (req, res, next) => {
         full_name: member.full_name || "",
         phone: member.phone || "",
         email: member.email || "",
-        status: member.status || "inactive",
+        status: "inactive", // All members start as inactive
         membership_end: null,
         registration_date: member.registration_date,
         profile_photo: member.profile_photo || "",
-        current_plan: member.current_plan || "No Plan",
-        remaining_days: member.remaining_days || 0,
+        current_plan: "No Plan",
+        remaining_days: 0,
         created_at: member.created_at,
         updated_at: member.updated_at
       })),
