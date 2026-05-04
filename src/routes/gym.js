@@ -48,6 +48,301 @@ gymApiRouter.post("/login", handleAuthLogin);
 /** POST /api/register — ApiService: api/register */
 gymApiRouter.post("/register", handleAuthRegister);
 
+/** GET /api/membership-plans — Get all membership plans */
+gymApiRouter.get("/membership-plans", async (req, res, next) => {
+  try {
+    const [results] = await db.query("SELECT * FROM membership_plans WHERE is_active = TRUE ORDER BY price ASC");
+    return res.json({
+      success: true,
+      data: results.map(plan => ({
+        id: plan.id,
+        planName: plan.plan_name,
+        planType: plan.plan_type,
+        durationMonths: plan.duration_months,
+        price: Number(plan.price),
+        description: plan.description,
+        features: plan.features,
+        isActive: Boolean(plan.is_active),
+        createdAt: plan.created_at,
+        formattedPrice: "₱" + Number(plan.price).toFixed(2),
+        durationLabel: plan.duration_months === 1 ? "1 Month" : plan.duration_months === 3 ? "3 Months" : plan.duration_months === 12 ? "1 Year" : plan.duration_months + " Months"
+      })),
+      message: "Membership plans fetched successfully"
+    });
+  } catch (err) {
+    console.error('Membership plans error:', err);
+    return next(err);
+  }
+});
+
+/** POST /api/payments — Process payment */
+gymApiRouter.post("/payments", async (req, res, next) => {
+  try {
+    const { member_id, plan_id, amount, payment_method, notes, processed_by } = req.body || {};
+    
+    if (!member_id || !plan_id || !amount) {
+      return res.status(400).json({ success: false, message: "member_id, plan_id, and amount are required" });
+    }
+
+    // Get member and plan details
+    const [memberRows] = await db.query("SELECT * FROM members WHERE id = ?", [member_id]);
+    const [planRows] = await db.query("SELECT * FROM membership_plans WHERE id = ?", [plan_id]);
+    
+    if (memberRows.length === 0) {
+      return res.status(404).json({ success: false, message: "Member not found" });
+    }
+    
+    if (planRows.length === 0) {
+      return res.status(404).json({ success: false, message: "Membership plan not found" });
+    }
+
+    const member = memberRows[0];
+    const plan = planRows[0];
+
+    // Create payment record
+    const [paymentResult] = await db.query(`
+      INSERT INTO payments (receipt_number, member_id, member_name, member_code, plan_id, plan_name, amount, payment_method, notes, processed_by, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paid')
+    `, [
+      `RCP${new Date().getFullYear()}${String(member_id).padStart(4, '0')}`,
+      member_id,
+      member.full_name,
+      member.member_code,
+      plan_id,
+      plan.plan_name,
+      amount,
+      payment_method || 'cash',
+      notes || '',
+      processed_by || 'system'
+    ]);
+
+    // Update member status and plan
+    await db.query(`
+      UPDATE members SET 
+        membership_plan_id = ?, 
+        status = 'active'
+      WHERE id = ?
+    `, [plan_id, member_id]);
+
+    // Create membership record
+    const expirationDate = new Date();
+    expirationDate.setMonth(expirationDate.getMonth() + plan.duration_months);
+    
+    await db.query(`
+      INSERT INTO memberships (user_id, membership_plan, start_date, expiration_date, status)
+      SELECT u.id, ?, CURDATE(), ?, 'active'
+      FROM users u WHERE u.member_id = ?
+    `, [plan.plan_name, expirationDate, member_id]);
+
+    return res.json({
+      success: true,
+      data: {
+        id: paymentResult.insertId,
+        receiptNumber: `RCP${new Date().getFullYear()}${String(member_id).padStart(4, '0')}`,
+        memberId: member_id,
+        memberName: member.full_name,
+        memberCode: member.member_code,
+        planId: plan_id,
+        planName: plan.plan_name,
+        amount: Number(amount),
+        paymentMethod: payment_method || 'cash',
+        paymentDate: new Date().toISOString(),
+        notes: notes || '',
+        processedBy: processed_by || 'system',
+        status: 'paid',
+        balance: 0.00
+      },
+      message: "Payment processed successfully"
+    });
+  } catch (err) {
+    console.error('Payment processing error:', err);
+    return next(err);
+  }
+});
+
+/** POST /api/attendance/check-in — Check in member */
+gymApiRouter.post("/attendance/check-in", async (req, res, next) => {
+  try {
+    const { member_id } = req.body || {};
+    
+    if (!member_id) {
+      return res.status(400).json({ success: false, message: "member_id is required" });
+    }
+
+    // Get member details
+    const [memberRows] = await db.query("SELECT * FROM members WHERE id = ?", [member_id]);
+    
+    if (memberRows.length === 0) {
+      return res.status(404).json({ success: false, message: "Member not found" });
+    }
+
+    const member = memberRows[0];
+
+    // Check if already checked in
+    const [existingRows] = await db.query(`
+      SELECT * FROM attendance 
+      WHERE member_id = ? AND status = 'checked_in'
+      ORDER BY check_in DESC LIMIT 1
+    `, [member_id]);
+
+    if (existingRows.length > 0) {
+      return res.status(400).json({ success: false, message: "Member already checked in" });
+    }
+
+    // Create attendance record
+    const [attendanceResult] = await db.query(`
+      INSERT INTO attendance (member_id, member_name, member_code, profile_photo, status)
+      VALUES (?, ?, ?, ?, 'checked_in')
+    `, [member_id, member.full_name, member.member_code, member.profile_photo]);
+
+    return res.json({
+      success: true,
+      data: {
+        id: attendanceResult.insertId,
+        memberId: member_id,
+        memberName: member.full_name,
+        memberCode: member.member_code,
+        profilePhoto: member.profile_photo,
+        checkIn: new Date().toISOString(),
+        checkOut: null,
+        date: new Date().toISOString().split('T')[0],
+        durationMinutes: 0,
+        status: 'checked_in'
+      },
+      message: "Member checked in successfully"
+    });
+  } catch (err) {
+    console.error('Check-in error:', err);
+    return next(err);
+  }
+});
+
+/** POST /api/attendance/check-out — Check out member */
+gymApiRouter.post("/attendance/check-out", async (req, res, next) => {
+  try {
+    const { member_id } = req.body || {};
+    
+    if (!member_id) {
+      return res.status(400).json({ success: false, message: "member_id is required" });
+    }
+
+    // Get current check-in record
+    const [attendanceRows] = await db.query(`
+      SELECT * FROM attendance 
+      WHERE member_id = ? AND status = 'checked_in'
+      ORDER BY check_in DESC LIMIT 1
+    `, [member_id]);
+
+    if (attendanceRows.length === 0) {
+      return res.status(400).json({ success: false, message: "No active check-in found" });
+    }
+
+    const attendance = attendanceRows[0];
+    const checkOutTime = new Date();
+
+    // Update attendance record
+    await db.query(`
+      UPDATE attendance 
+      SET check_out = ?, status = 'checked_out'
+      WHERE id = ?
+    `, [checkOutTime, attendance.id]);
+
+    const durationMinutes = Math.floor((checkOutTime - new Date(attendance.check_in)) / (1000 * 60));
+
+    return res.json({
+      success: true,
+      data: {
+        id: attendance.id,
+        memberId: member_id,
+        memberName: attendance.member_name,
+        memberCode: attendance.member_code,
+        profilePhoto: attendance.profile_photo,
+        checkIn: attendance.check_in,
+        checkOut: checkOutTime.toISOString(),
+        date: attendance.check_in.toString().split('T')[0],
+        durationMinutes: durationMinutes,
+        status: 'checked_out',
+        formattedDuration: durationMinutes > 0 ? 
+          (Math.floor(durationMinutes / 60) + 'h ' + (durationMinutes % 60) + 'm') : 
+          'In progress'
+      },
+      message: "Member checked out successfully"
+    });
+  } catch (err) {
+    console.error('Check-out error:', err);
+    return next(err);
+  }
+});
+
+/** GET /api/workout-schedules — Get workout schedules */
+gymApiRouter.get("/workout-schedules", async (req, res, next) => {
+  try {
+    const userId = req.query.user_id;
+    
+    let sql = "SELECT * FROM workout_schedules";
+    const params = [];
+    
+    if (userId) {
+      sql += " WHERE user_id = ?";
+      params.push(Number(userId));
+    }
+    
+    sql += " ORDER BY created_at DESC";
+
+    const [results] = await db.query(sql, params);
+
+    return res.json({
+      success: true,
+      data: results.map(schedule => ({
+        id: schedule.id,
+        userId: schedule.user_id,
+        workoutName: schedule.workout_name,
+        workoutTime: schedule.workout_time,
+        status: schedule.status,
+        createdAt: schedule.created_at,
+        isCompleted: schedule.status === 'completed'
+      })),
+      message: "Workout schedules fetched successfully"
+    });
+  } catch (err) {
+    console.error('Workout schedules error:', err);
+    return next(err);
+  }
+});
+
+/** POST /api/workout-schedules — Create workout schedule */
+gymApiRouter.post("/workout-schedules", async (req, res, next) => {
+  try {
+    const { user_id, workout_name, workout_time, status } = req.body || {};
+    
+    if (!user_id || !workout_name || !workout_time) {
+      return res.status(400).json({ success: false, message: "user_id, workout_name, and workout_time are required" });
+    }
+
+    const [result] = await db.query(`
+      INSERT INTO workout_schedules (user_id, workout_name, workout_time, status)
+      VALUES (?, ?, ?, ?)
+    `, [user_id, workout_name, workout_time, status || 'pending']);
+
+    return res.json({
+      success: true,
+      data: {
+        id: result.insertId,
+        userId: user_id,
+        workoutName: workout_name,
+        workoutTime: workout_time,
+        status: status || 'pending',
+        createdAt: new Date().toISOString(),
+        isCompleted: (status || 'pending') === 'completed'
+      },
+      message: "Workout schedule created successfully"
+    });
+  } catch (err) {
+    console.error('Create workout schedule error:', err);
+    return next(err);
+  }
+});
+
 /** GET /api/members — MemberListActivity */
 gymApiRouter.get("/members", async (req, res, next) => {
   try {
@@ -57,29 +352,77 @@ gymApiRouter.get("/members", async (req, res, next) => {
     const limit = Number(req.query.limit) || 100;
     const offset = (page - 1) * limit;
 
-    // Very simple query that will definitely work
-    let sql = "SELECT * FROM members";
+    // Enhanced query with proper status handling
+    let sql = `
+      SELECT 
+        m.*,
+        u.user_type,
+        u.profile_photo,
+        mp.plan_name as current_plan_name,
+        mp.price as current_plan_price,
+        CASE 
+          WHEN u.user_type = 'admin' THEN 'PERMANENT'
+          WHEN mp.plan_name IS NOT NULL AND m.status = 'active' THEN 'ACTIVE'
+          WHEN mp.plan_name IS NOT NULL AND m.status = 'expired' THEN 'EXPIRED'
+          ELSE 'NO MONTHLY PLAN'
+        END as display_status,
+        CASE 
+          WHEN mp.expiration_date > CURDATE() THEN DATEDIFF(mp.expiration_date, CURDATE())
+          ELSE 0
+        END as remaining_days
+      FROM members m
+      LEFT JOIN users u ON u.member_id = m.id
+      LEFT JOIN membership_plans mp ON m.membership_plan_id = mp.id
+      LEFT JOIN memberships ms ON u.id = ms.user_id AND ms.status = 'active'
+    `;
     const params = [];
 
     if (search) {
-      sql += " WHERE full_name LIKE ? OR email LIKE ? OR phone LIKE ?";
+      sql += " WHERE (m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ?)";
       const q = `%${search}%`;
       params.push(q, q, q);
     }
 
-    sql += " ORDER BY id DESC LIMIT ? OFFSET ?";
+    // Apply status filter if specified
+    if (status && status !== 'all') {
+      if (status === 'active') {
+        sql += " AND m.status = 'active' AND ms.expiration_date > CURDATE()";
+      } else if (status === 'inactive') {
+        sql += " AND (m.status = 'inactive' OR (m.status = 'active' AND ms.expiration_date <= CURDATE()))";
+      } else if (status === 'expired') {
+        sql += " AND m.status = 'expired' AND ms.expiration_date <= CURDATE()";
+      }
+    }
+
+    sql += " ORDER BY m.id DESC LIMIT ? OFFSET ?";
     params.push(limit, offset);
 
     const [results] = await db.query(sql, params);
 
-    // Simple count query
-    let countSql = "SELECT COUNT(*) as total FROM members";
+    // Get total count for pagination
+    let countSql = `
+      SELECT COUNT(*) as total 
+      FROM members m
+      LEFT JOIN users u ON u.member_id = m.id
+      LEFT JOIN membership_plans mp ON m.membership_plan_id = mp.id
+      LEFT JOIN memberships ms ON u.id = ms.user_id AND ms.status = 'active'
+    `;
     const countParams = [];
     
     if (search) {
-      countSql += " WHERE full_name LIKE ? OR email LIKE ? OR phone LIKE ?";
+      countSql += " WHERE (m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ?)";
       const q = `%${search}%`;
       countParams.push(q, q, q);
+    }
+    
+    if (status && status !== 'all') {
+      if (status === 'active') {
+        countSql += " AND m.status = 'active' AND ms.expiration_date > CURDATE()";
+      } else if (status === 'inactive') {
+        countSql += " AND (m.status = 'inactive' OR (m.status = 'active' AND ms.expiration_date <= CURDATE()))";
+      } else if (status === 'expired') {
+        countSql += " AND m.status = 'expired' AND ms.expiration_date <= CURDATE()";
+      }
     }
 
     const [countResult] = await db.query(countSql, countParams);
@@ -92,12 +435,12 @@ gymApiRouter.get("/members", async (req, res, next) => {
         full_name: member.full_name || "",
         phone: member.phone || "",
         email: member.email || "",
-        status: "inactive", // All members start as inactive
-        membership_end: null,
+        status: member.display_status || "NO MONTHLY PLAN",
+        membership_end: member.expiration_date,
         registration_date: member.registration_date,
         profile_photo: member.profile_photo || "",
-        current_plan: "No Plan",
-        remaining_days: 0,
+        current_plan: member.current_plan_name || "NO MONTHLY PLAN",
+        remaining_days: member.remaining_days || 0,
         created_at: member.created_at,
         updated_at: member.updated_at
       })),
