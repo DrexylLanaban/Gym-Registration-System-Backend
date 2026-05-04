@@ -270,4 +270,48 @@ gymApiRouter.post("/upload_trainer_photo", upload.single("photo"), async (req, r
   }
 });
 
+/** POST /api/update_profile_photo?id= */
+gymApiRouter.post("/update_profile_photo", upload.single("photo"), async (req, res, next) => {
+  try {
+    const idFromQuery = Number(req.query.id);
+    const idFromBody = Number(req.body?.id);
+    const userId = Number.isFinite(idFromQuery)
+      ? idFromQuery
+      : Number.isFinite(idFromBody)
+        ? idFromBody
+        : NaN;
+
+    if (!Number.isFinite(userId)) {
+      return res.status(400).json({
+        success: false,
+        message: "User id is required (?id=...)",
+      });
+    }
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "photo file is required" });
+    }
+
+    const mime = req.file.mimetype || "image/jpeg";
+    const base64 = req.file.buffer.toString("base64");
+    const dataUrl = `data:${mime};base64,${base64}`;
+
+    const [updateResult] = await db.query("UPDATE users SET profile_photo = ? WHERE id = ?", [
+      dataUrl,
+      userId,
+    ]);
+    if (!updateResult.affectedRows) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    const [rows] = await db.query("SELECT * FROM users WHERE id = ?", [userId]);
+    return res.json({
+      success: true,
+      data: rows[0] || null,
+      message: "Profile photo updated successfully",
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
 module.exports = { gymApiRouter };
