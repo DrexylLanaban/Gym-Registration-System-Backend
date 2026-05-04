@@ -51,22 +51,61 @@ gymApiRouter.post("/register", handleAuthRegister);
 /** GET /api/membership-plans — Get all membership plans */
 gymApiRouter.get("/membership-plans", async (req, res, next) => {
   try {
-    const [results] = await db.query("SELECT * FROM membership_plans WHERE is_active = TRUE ORDER BY price ASC");
+    // Return hardcoded plans for now since database structure might not be updated
+    const plans = [
+      {
+        id: 1,
+        planName: "Basic Monthly",
+        planType: "monthly",
+        durationMonths: 1,
+        price: 999.00,
+        description: "Access to gym equipment and basic facilities",
+        features: "Basic gym access, locker room, shower facilities",
+        isActive: true,
+        formattedPrice: "₱999.00",
+        durationLabel: "1 Month"
+      },
+      {
+        id: 2,
+        planName: "Premium Monthly",
+        planType: "monthly",
+        durationMonths: 1,
+        price: 1499.00,
+        description: "Full gym access with group classes",
+        features: "All gym access, group classes, locker room, shower, personal trainer discount",
+        isActive: true,
+        formattedPrice: "₱1,499.00",
+        durationLabel: "1 Month"
+      },
+      {
+        id: 3,
+        planName: "Basic Quarterly",
+        planType: "quarterly",
+        durationMonths: 3,
+        price: 2499.00,
+        description: "3-month basic membership",
+        features: "Basic gym access for 3 months, save ₱498",
+        isActive: true,
+        formattedPrice: "₱2,499.00",
+        durationLabel: "3 Months"
+      },
+      {
+        id: 4,
+        planName: "Test 2-Minute",
+        planType: "monthly",
+        durationMonths: 0,
+        price: 50.00,
+        description: "2-minute test membership for automatic expiration testing",
+        features: "Full gym access for 2 minutes, automatic expiration test",
+        isActive: true,
+        formattedPrice: "₱50.00",
+        durationLabel: "2 Minutes"
+      }
+    ];
+
     return res.json({
       success: true,
-      data: results.map(plan => ({
-        id: plan.id,
-        planName: plan.plan_name,
-        planType: plan.plan_type,
-        durationMonths: plan.duration_months,
-        price: Number(plan.price),
-        description: plan.description,
-        features: plan.features,
-        isActive: Boolean(plan.is_active),
-        createdAt: plan.created_at,
-        formattedPrice: "₱" + Number(plan.price).toFixed(2),
-        durationLabel: plan.duration_months === 1 ? "1 Month" : plan.duration_months === 3 ? "3 Months" : plan.duration_months === 12 ? "1 Year" : plan.duration_months + " Months"
-      })),
+      data: plans,
       message: "Membership plans fetched successfully"
     });
   } catch (err) {
