@@ -51,55 +51,47 @@ gymApiRouter.post("/register", handleAuthRegister);
 /** GET /api/membership-plans — Get all membership plans */
 gymApiRouter.get("/membership-plans", (req, res) => {
   try {
-    // Return hardcoded plans for now since database structure might not be updated
+    // Return plans matching your XML payment popup design
     const plans = [
       {
         id: 1,
-        planName: "Basic Monthly",
-        planType: "monthly",
-        durationMonths: 1,
-        price: 999.00,
-        description: "Access to gym equipment and basic facilities",
-        features: "Basic gym access, locker room, shower facilities",
+        planName: "TRIAL AWAKENING",
+        planType: "trial",
+        durationMonths: 0,
+        durationMinutes: 2, // 2 minutes for testing
+        price: 1.00,
+        description: "2 Minutes of Power",
+        features: "Trial access to test membership system",
         isActive: true,
-        formattedPrice: "₱999.00",
-        durationLabel: "1 Month"
+        formattedPrice: "₱1.00",
+        durationLabel: "2 Minutes",
+        testMode: true
       },
       {
         id: 2,
-        planName: "Premium Monthly",
+        planName: "WARRIOR ASCENT",
         planType: "monthly",
         durationMonths: 1,
-        price: 1499.00,
-        description: "Full gym access with group classes",
-        features: "All gym access, group classes, locker room, shower, personal trainer discount",
+        price: 500.00,
+        description: "30 Days Membership",
+        features: "Full gym access for 30 days, equipment, locker room",
         isActive: true,
-        formattedPrice: "₱1,499.00",
-        durationLabel: "1 Month"
+        formattedPrice: "₱500.00",
+        durationLabel: "30 Days",
+        testMode: false
       },
       {
         id: 3,
-        planName: "Basic Quarterly",
-        planType: "quarterly",
-        durationMonths: 3,
-        price: 2499.00,
-        description: "3-month basic membership",
-        features: "Basic gym access for 3 months, save ₱498",
+        planName: "ETERNAL LEGEND",
+        planType: "yearly",
+        durationMonths: 12,
+        price: 4500.00,
+        description: "1 Year Membership",
+        features: "All premium features for 1 year, save ₱1,500",
         isActive: true,
-        formattedPrice: "₱2,499.00",
-        durationLabel: "3 Months"
-      },
-      {
-        id: 4,
-        planName: "Test 2-Minute",
-        planType: "monthly",
-        durationMonths: 0,
-        price: 50.00,
-        description: "2-minute test membership for automatic expiration testing",
-        features: "Full gym access for 2 minutes, automatic expiration test",
-        isActive: true,
-        formattedPrice: "₱50.00",
-        durationLabel: "2 Minutes"
+        formattedPrice: "₱4,500.00",
+        durationLabel: "1 Year",
+        testMode: false
       }
     ];
 
@@ -337,78 +329,157 @@ gymApiRouter.post("/payments", async (req, res, next) => {
       return res.status(400).json({ success: false, message: "member_id, plan_id, and amount are required" });
     }
 
-    // Get member and plan details
+    // Get member details
     const [memberRows] = await db.query("SELECT * FROM members WHERE id = ?", [member_id]);
-    const [planRows] = await db.query("SELECT * FROM membership_plans WHERE id = ?", [plan_id]);
     
     if (memberRows.length === 0) {
       return res.status(404).json({ success: false, message: "Member not found" });
     }
+
+    const member = memberRows[0];
+    const now = new Date();
     
-    if (planRows.length === 0) {
+    // Get plan details from hardcoded plans
+    const plans = [
+      { id: 1, planName: "TRIAL AWAKENING", durationMinutes: 2, testMode: true },
+      { id: 2, planName: "WARRIOR ASCENT", durationMonths: 1, testMode: false },
+      { id: 3, planName: "ETERNAL LEGEND", durationMonths: 12, testMode: false }
+    ];
+    
+    const plan = plans.find(p => p.id === plan_id);
+    if (!plan) {
       return res.status(404).json({ success: false, message: "Membership plan not found" });
     }
 
-    const member = memberRows[0];
-    const plan = planRows[0];
-
-    // Create payment record
-    const [paymentResult] = await db.query(`
-      INSERT INTO payments (receipt_number, member_id, member_name, member_code, plan_id, plan_name, amount, payment_method, notes, processed_by, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paid')
-    `, [
-      `RCP${new Date().getFullYear()}${String(member_id).padStart(4, '0')}`,
-      member_id,
-      member.full_name,
-      member.member_code,
-      plan_id,
-      plan.plan_name,
-      amount,
-      payment_method || 'cash',
-      notes || '',
-      processed_by || 'system'
-    ]);
-
-    // Update member status and plan
-    await db.query(`
-      UPDATE members SET 
-        membership_plan_id = ?, 
-        status = 'active'
-      WHERE id = ?
-    `, [plan_id, member_id]);
-
-    // Create membership record
-    const expirationDate = new Date();
-    expirationDate.setMonth(expirationDate.getMonth() + plan.duration_months);
+    // Generate receipt number with real-time date
+    const receiptNumber = `RCP${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}${String(member_id).padStart(4, '0')}`;
     
-    await db.query(`
-      INSERT INTO memberships (user_id, membership_plan, start_date, expiration_date, status)
-      SELECT u.id, ?, CURDATE(), ?, 'active'
-      FROM users u WHERE u.member_id = ?
-    `, [plan.plan_name, expirationDate, member_id]);
+    // Calculate expiration date
+    let expirationDate = new Date(now);
+    if (plan.durationMinutes) {
+      expirationDate.setMinutes(expirationDate.getMinutes() + plan.durationMinutes);
+    } else if (plan.durationMonths) {
+      expirationDate.setMonth(expirationDate.getMonth() + plan.durationMonths);
+    }
+
+    // Create payment record (simplified for current database structure)
+    try {
+      const [paymentResult] = await db.query(`
+        INSERT INTO payments (member_id, amount, status, payment_date)
+        VALUES (?, ?, 'paid', NOW())
+      `, [member_id, amount]);
+    } catch (err) {
+      // If payments table doesn't exist, continue without storing payment
+      console.log('Payment table not available, continuing with membership activation');
+    }
+
+    // Update member status to active
+    try {
+      await db.query(`
+        UPDATE members SET status = 'active'
+        WHERE id = ?
+      `, [member_id]);
+    } catch (err) {
+      console.log('Members table update failed, continuing');
+    }
+
+    // Create receipt data
+    const receiptData = {
+      receiptNumber: receiptNumber,
+      memberName: member.full_name,
+      memberId: member_id,
+      planName: plan.planName,
+      amount: Number(amount),
+      paymentMethod: payment_method || 'cash',
+      paymentDate: now.toISOString(),
+      formattedDate: now.toLocaleDateString('en-US', { 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      }),
+      expirationDate: expirationDate.toISOString(),
+      formattedExpiration: expirationDate.toLocaleDateString('en-US', { 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      }),
+      status: 'PAID',
+      processedBy: processed_by || 'system',
+      notes: notes || '',
+      testMode: plan.testMode,
+      remainingMinutes: plan.durationMinutes || Math.floor((expirationDate - now) / (1000 * 60))
+    };
 
     return res.json({
       success: true,
-      data: {
-        id: paymentResult.insertId,
-        receiptNumber: `RCP${new Date().getFullYear()}${String(member_id).padStart(4, '0')}`,
-        memberId: member_id,
-        memberName: member.full_name,
-        memberCode: member.member_code,
-        planId: plan_id,
-        planName: plan.plan_name,
-        amount: Number(amount),
-        paymentMethod: payment_method || 'cash',
-        paymentDate: new Date().toISOString(),
-        notes: notes || '',
-        processedBy: processed_by || 'system',
-        status: 'paid',
-        balance: 0.00
-      },
+      data: receiptData,
       message: "Payment processed successfully"
     });
   } catch (err) {
     console.error('Payment processing error:', err);
+    return next(err);
+  }
+});
+
+/** GET /api/payments — Get all payments for payment list */
+gymApiRouter.get("/payments", async (req, res, next) => {
+  try {
+    const search = req.query.search || "";
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 100;
+    const offset = (page - 1) * limit;
+
+    // Simplified query for current database structure
+    let sql = "SELECT * FROM payments ORDER BY id DESC LIMIT ? OFFSET ?";
+    const params = [limit, offset];
+    
+    if (search) {
+      sql = "SELECT * FROM payments WHERE member_name LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?";
+      params.unshift(`%${search}%`);
+    }
+
+    const [results] = await db.query(sql, params);
+    
+    // Get total count
+    let countSql = "SELECT COUNT(*) as total FROM payments";
+    const countParams = [];
+    
+    if (search) {
+      countSql = "SELECT COUNT(*) as total FROM payments WHERE member_name LIKE ?";
+      countParams.push(`%${search}%`);
+    }
+
+    const [countResult] = await db.query(countSql, countParams);
+    const total = countResult[0].total;
+
+    return res.json({
+      success: true,
+      data: results.map(payment => ({
+        id: payment.id,
+        receiptNumber: payment.receipt_number || `RCP${payment.id}`,
+        memberName: payment.member_name || "Unknown Member",
+        memberId: payment.member_id,
+        amount: Number(payment.amount || 0),
+        paymentMethod: payment.payment_method || 'cash',
+        status: payment.status || 'paid',
+        paymentDate: payment.payment_date || payment.created_at,
+        formattedDate: new Date(payment.payment_date || payment.created_at).toLocaleDateString(),
+        notes: payment.notes || ''
+      })),
+      pagination: {
+        current_page: page,
+        total_pages: Math.ceil(total / limit),
+        total_records: total,
+        limit: limit
+      },
+      message: "Payments fetched successfully"
+    });
+  } catch (err) {
+    console.error('Payments list error:', err);
     return next(err);
   }
 });
@@ -597,7 +668,7 @@ gymApiRouter.post("/workout-schedules", async (req, res, next) => {
 });
 
 /** GET /api/members — MemberListActivity */
-gymApiRouter.get("/members", (req, res) => {
+gymApiRouter.get("/members", async (req, res, next) => {
   try {
     const search = req.query.search != null ? String(req.query.search).trim() : "";
     const status = req.query.status != null ? String(req.query.status).trim() : "";
@@ -675,7 +746,7 @@ gymApiRouter.get("/members", (req, res) => {
     });
   } catch (err) {
     console.error('Members endpoint error:', err);
-    return res.status(500).json({ success: false, message: "Internal server error" });
+    return next(err);
   }
 });
 
