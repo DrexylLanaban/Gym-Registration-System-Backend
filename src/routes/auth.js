@@ -32,9 +32,15 @@ function userPayloadForApp(userRow, token) {
   const profileFromMember =
     base.member_profile_image != null ? String(base.member_profile_image) : "";
   const profilePhoto = profileFromUser || profileFromMember || "";
+  const rawId = base.id;
+  const idNum = rawId != null && rawId !== "" ? Number(rawId) : 0;
   return {
-    id: Number(base.id),
-    memberId: base.member_id != null ? Number(base.member_id) : null,
+    id: Number.isFinite(idNum) ? idNum : 0,
+    memberId: (() => {
+      if (base.member_id == null || base.member_id === "") return null;
+      const n = Number(base.member_id);
+      return Number.isFinite(n) ? n : null;
+    })(),
     name: base.name != null ? String(base.name) : "",
     email,
     role: base.role != null ? String(base.role) : "staff",
@@ -77,13 +83,25 @@ async function handleAuthLogin(req, res, next) {
     }
     const passwordStr = String(password);
 
-    const [rows] = await db.query(
-      `SELECT u.*, m.profile_image AS member_profile_image
-       FROM users u
-       LEFT JOIN members m ON m.id = u.member_id
-       WHERE (u.username = ? OR LOWER(TRIM(u.email)) = ?) AND u.password = ?`,
-      [identifier, identifier, passwordStr]
-    );
+    let rows;
+    try {
+      // Prefer username OR normalized email match (users.email may be missing on legacy DBs)
+      [rows] = await db.query(
+        `SELECT u.*
+         FROM users u
+         WHERE (u.username = ? OR LOWER(TRIM(COALESCE(u.email, ''))) = ?) AND u.password = ?`,
+        [identifier, identifier, passwordStr]
+      );
+    } catch (err) {
+      if (err.code === "ER_BAD_FIELD_ERROR") {
+        [rows] = await db.query(
+          "SELECT u.* FROM users u WHERE u.username = ? AND u.password = ?",
+          [identifier, passwordStr]
+        );
+      } else {
+        throw err;
+      }
+    }
 
     if (rows.length === 0) {
       return res.status(401).json({ success: false, message: "Invalid credentials" });
@@ -91,6 +109,13 @@ async function handleAuthLogin(req, res, next) {
 
     return res.json(authSuccessBody(rows[0]));
   } catch (err) {
+    if (err.code === "ER_BAD_FIELD_ERROR") {
+      return res.status(500).json({
+        success: false,
+        message:
+          "Database schema mismatch (e.g. missing users.email). Apply sql/migration_gym_dashboard_v2.sql or align the users table with the backend.",
+      });
+    }
     return next(err);
   }
 }
@@ -136,13 +161,7 @@ async function handleAuthRegister(req, res, next) {
       await conn.commit();
 
       const userId = uResult.insertId;
-      const [rows] = await conn.query(
-        `SELECT u.*, m.profile_image AS member_profile_image
-         FROM users u
-         LEFT JOIN members m ON m.id = u.member_id
-         WHERE u.id = ?`,
-        [userId]
-      );
+      const [rows] = await conn.query("SELECT * FROM users u WHERE u.id = ?", [userId]);
       return res.status(201).json({
         ...authSuccessBody(rows[0]),
         message: "Registration successful",

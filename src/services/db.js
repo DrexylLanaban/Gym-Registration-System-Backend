@@ -12,6 +12,10 @@ const db = mysql.createPool({
   queueLimit: 0,
   connectTimeout: Number(process.env.DB_CONNECT_TIMEOUT_MS || 20000),
   ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : undefined,
+  // Avoid BigInt in row objects (breaks JSON.stringify / res.json on some paths)
+  supportBigNumbers: true,
+  bigNumberStrings: true,
+  decimalNumbers: true,
 });
 
 module.exports = { db };

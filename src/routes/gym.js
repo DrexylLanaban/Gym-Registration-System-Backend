@@ -49,9 +49,7 @@ gymApiRouter.post("/attendance", async (req, res, next) => {
 });
 
 /**
- * GET /api/payments — PaymentListActivity
- * Optional query: member_id — when set, only that member’s rows (member view / session member id).
- */
+ * GET /api/payments — PaymentListActivity */
 gymApiRouter.get("/payments", async (req, res, next) => {
   try {
     const memberId = req.query.member_id;
@@ -71,8 +69,8 @@ gymApiRouter.get("/payments", async (req, res, next) => {
   }
 });
 
-/** GET /api/dashboard/stats — MainActivity loadDashboardStats / monthly income (paid), pending count */
-gymApiRouter.get("/dashboard/stats", async (req, res, next) => {
+/** GET /api/dashboard/stats — MainActivity (Retrofit may use api/dashboard_stats) */
+async function getDashboardStats(req, res, next) {
   try {
     const [rows] = await db.query("SELECT * FROM dashboard_summary");
     const r = rows[0] || {};
@@ -81,17 +79,23 @@ gymApiRouter.get("/dashboard/stats", async (req, res, next) => {
       data: {
         totalMembers: Number(r.total_members ?? 0),
         activeMembers: Number(r.active_members ?? 0),
+        inactiveMembers: Number(r.inactive_members ?? 0),
+        expiredMembers: Number(r.expired_members ?? 0),
         todayAttendance: Number(r.today_attendance ?? 0),
         monthlyIncome: Number(r.monthly_income ?? 0),
         totalTrainers: Number(r.total_trainers ?? 0),
         pendingPayments: Number(r.pending_payments ?? 0),
+        newMembersThisMonth: Number(r.new_members_this_month ?? 0),
         currency: "PHP",
       },
     });
   } catch (err) {
     return next(err);
   }
-});
+}
+
+gymApiRouter.get("/dashboard/stats", getDashboardStats);
+gymApiRouter.get("/dashboard_stats", getDashboardStats);
 
 /** GET /api/workout-schedules?member_id= — member workout list */
 gymApiRouter.get("/workout-schedules", async (req, res, next) => {
