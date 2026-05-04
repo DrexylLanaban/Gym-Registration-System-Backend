@@ -58,27 +58,66 @@ gymApiRouter.get("/members", async (req, res, next) => {
     const offset = (page - 1) * limit;
 
     let sql = `
-      SELECT m.*, u.profile_photo, 
-             CASE 
-               WHEN EXISTS(SELECT 1 FROM payments p WHERE p.member_id = m.id AND p.status = 'paid') THEN 'paid'
-               ELSE 'pending'
-             END as payment_status,
-             (SELECT MAX(p.payment_date) FROM payments p WHERE p.member_id = m.id AND p.status = 'paid') as last_payment_date
+      SELECT 
+        m.*,
+        u.role,
+        u.profile_photo,
+        CASE 
+          WHEN u.role = 'admin' THEN NULL
+          WHEN EXISTS (
+            SELECT 1 FROM memberships ms 
+            WHERE ms.user_id = u.id 
+            AND ms.expiration_date > CURDATE()
+          ) THEN 'active'
+          WHEN EXISTS (
+            SELECT 1 FROM memberships ms 
+            WHERE ms.user_id = u.id 
+            AND ms.expiration_date <= CURDATE()
+          ) THEN 'expired'
+          ELSE 'inactive'
+        END as membership_status,
+        (
+          SELECT ms.membership_plan 
+          FROM memberships ms 
+          WHERE ms.user_id = u.id 
+          ORDER BY ms.created_at DESC 
+          LIMIT 1
+        ) as current_plan,
+        (
+          SELECT ms.expiration_date 
+          FROM memberships ms 
+          WHERE ms.user_id = u.id 
+          ORDER BY ms.created_at DESC 
+          LIMIT 1
+        ) as expiration_date,
+        (
+          SELECT DATEDIFF(ms.expiration_date, CURDATE()) 
+          FROM memberships ms 
+          WHERE ms.user_id = u.id 
+          AND ms.expiration_date > CURDATE()
+          ORDER BY ms.created_at DESC 
+          LIMIT 1
+        ) as remaining_days
       FROM members m
-      LEFT JOIN users u ON u.member_id = m.id
+      JOIN users u ON u.member_id = m.id
+      WHERE u.role = 'member'
     `;
     const params = [];
 
     if (search) {
-      sql += " WHERE m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ?";
+      sql += " AND (m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ?)";
       const q = `%${search}%`;
       params.push(q, q, q);
     }
 
     if (status) {
-      sql += search ? " AND" : " WHERE";
-      sql += " m.status = ?";
-      params.push(status);
+      if (status === 'active') {
+        sql += " AND EXISTS (SELECT 1 FROM memberships ms WHERE ms.user_id = u.id AND ms.expiration_date > CURDATE())";
+      } else if (status === 'inactive') {
+        sql += " AND NOT EXISTS (SELECT 1 FROM memberships ms WHERE ms.user_id = u.id)";
+      } else if (status === 'expired') {
+        sql += " AND EXISTS (SELECT 1 FROM memberships ms WHERE ms.user_id = u.id AND ms.expiration_date <= CURDATE())";
+      }
     }
 
     sql += " ORDER BY m.id DESC LIMIT ? OFFSET ?";
@@ -87,19 +126,28 @@ gymApiRouter.get("/members", async (req, res, next) => {
     const [results] = await db.query(sql, params);
 
     // Get total count for pagination
-    let countSql = "SELECT COUNT(*) as total FROM members m";
+    let countSql = `
+      SELECT COUNT(*) as total 
+      FROM members m 
+      JOIN users u ON u.member_id = m.id 
+      WHERE u.role = 'member'
+    `;
     const countParams = [];
     
     if (search) {
-      countSql += " WHERE m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ?";
+      countSql += " AND (m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ?)";
       const q = `%${search}%`;
       countParams.push(q, q, q);
     }
     
     if (status) {
-      countSql += search ? " AND" : " WHERE";
-      countSql += " m.status = ?";
-      countParams.push(status);
+      if (status === 'active') {
+        countSql += " AND EXISTS (SELECT 1 FROM memberships ms WHERE ms.user_id = u.id AND ms.expiration_date > CURDATE())";
+      } else if (status === 'inactive') {
+        countSql += " AND NOT EXISTS (SELECT 1 FROM memberships ms WHERE ms.user_id = u.id)";
+      } else if (status === 'expired') {
+        countSql += " AND EXISTS (SELECT 1 FROM memberships ms WHERE ms.user_id = u.id AND ms.expiration_date <= CURDATE())";
+      }
     }
 
     const [countResult] = await db.query(countSql, countParams);
@@ -112,12 +160,12 @@ gymApiRouter.get("/members", async (req, res, next) => {
         full_name: member.full_name || "",
         phone: member.phone || "",
         email: member.email || "",
-        status: member.status || "active",
-        membership_end: member.membership_end,
+        status: member.membership_status || "inactive",
+        membership_end: member.expiration_date,
         registration_date: member.registration_date,
         profile_photo: member.profile_photo || "",
-        payment_status: member.payment_status || "pending",
-        last_payment_date: member.last_payment_date,
+        current_plan: member.current_plan || "No Plan",
+        remaining_days: member.remaining_days || 0,
         created_at: member.created_at,
         updated_at: member.updated_at
       })),
@@ -128,6 +176,75 @@ gymApiRouter.get("/members", async (req, res, next) => {
         limit: limit
       },
       message: "Members fetched successfully"
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/** GET /api/get_member — Get single member details */
+gymApiRouter.get("/get_member", async (req, res, next) => {
+  try {
+    const id = Number(req.query.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ success: false, message: "id query parameter required" });
+    }
+
+    const [rows] = await db.query(`
+      SELECT 
+        m.*,
+        u.role,
+        u.profile_photo,
+        CASE 
+          WHEN u.role = 'admin' THEN NULL
+          WHEN EXISTS (
+            SELECT 1 FROM memberships ms 
+            WHERE ms.user_id = u.id 
+            AND ms.expiration_date > CURDATE()
+          ) THEN 'active'
+          WHEN EXISTS (
+            SELECT 1 FROM memberships ms 
+            WHERE ms.user_id = u.id 
+            AND ms.expiration_date <= CURDATE()
+          ) THEN 'expired'
+          ELSE 'inactive'
+        END as membership_status,
+        (
+          SELECT ms.membership_plan 
+          FROM memberships ms 
+          WHERE ms.user_id = u.id 
+          ORDER BY ms.created_at DESC 
+          LIMIT 1
+        ) as current_plan,
+        (
+          SELECT ms.expiration_date 
+          FROM memberships ms 
+          WHERE ms.user_id = u.id 
+          ORDER BY ms.created_at DESC 
+          LIMIT 1
+        ) as expiration_date
+      FROM members m
+      JOIN users u ON u.member_id = m.id
+      WHERE m.id = ?
+    `, [id]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Member not found" });
+    }
+
+    const member = rows[0];
+    
+    // Don't return membership info for admin users
+    if (member.role === 'admin') {
+      member.membership_status = null;
+      member.current_plan = null;
+      member.expiration_date = null;
+    }
+
+    return res.json({ 
+      success: true, 
+      data: member,
+      message: "Member fetched successfully"
     });
   } catch (err) {
     return next(err);
@@ -184,43 +301,70 @@ gymApiRouter.get("/payments", async (req, res, next) => {
 });
 
 /** GET /api/dashboard/stats — MainActivity (Retrofit may use api/dashboard_stats) */
-gymApiRouter.get("/dashboard/stats", (req, res) => {
-  // Simple hardcoded response that doesn't require database
-  res.json({
-    success: true,
-    data: {
-      totalMembers: 12,
-      activeMembers: 8,
-      inactiveMembers: 2,
-      expiredMembers: 2,
-      todayAttendance: 5,
-      monthlyIncome: 15000.00,
-      totalTrainers: 8,
-      pendingPayments: 3,
-      newMembersThisMonth: 4,
-      currency: "PHP",
-    },
-  });
-});
+async function getDashboardStats(req, res, next) {
+  try {
+    // Get real database statistics
+    const [totalRevenue] = await db.query("SELECT COALESCE(SUM(amount), 0) as revenue FROM payments WHERE status = 'paid'");
+    const [totalMembers] = await db.query("SELECT COUNT(*) as count FROM users u JOIN members m ON u.member_id = m.id WHERE u.role = 'member'");
+    const [activeMembers] = await db.query(`
+      SELECT COUNT(*) as count 
+      FROM users u 
+      JOIN members m ON u.member_id = m.id 
+      JOIN memberships ms ON u.id = ms.user_id 
+      WHERE u.role = 'member' 
+        AND ms.status = 'active' 
+        AND ms.expiration_date > CURDATE()
+    `);
+    const [inactiveMembers] = await db.query(`
+      SELECT COUNT(*) as count 
+      FROM users u 
+      JOIN members m ON u.member_id = m.id 
+      WHERE u.role = 'member' 
+        AND (ms.status = 'inactive' OR ms.status IS NULL)
+    `);
+    const [expiredMembers] = await db.query(`
+      SELECT COUNT(*) as count 
+      FROM users u 
+      JOIN members m ON u.member_id = m.id 
+      JOIN memberships ms ON u.id = ms.user_id 
+      WHERE u.role = 'member' 
+        AND ms.expiration_date <= CURDATE()
+    `);
+    const [pendingMembers] = await db.query(`
+      SELECT COUNT(*) as count 
+      FROM users u 
+      JOIN members m ON u.member_id = m.id 
+      WHERE u.role = 'member' 
+        AND NOT EXISTS (
+          SELECT 1 FROM memberships ms WHERE ms.user_id = u.id
+        )
+    `);
+    const [todayAttendance] = await db.query("SELECT COUNT(*) as count FROM attendance WHERE DATE(check_in) = CURDATE()");
+    const [totalTrainers] = await db.query("SELECT COUNT(*) as count FROM trainers WHERE full_name IS NOT NULL AND full_name != ''");
 
-gymApiRouter.get("/dashboard_stats", (req, res) => {
-  // Same response for the alternative endpoint
-  res.json({
-    success: true,
-    data: {
-      totalMembers: 12,
-      activeMembers: 8,
-      inactiveMembers: 2,
-      expiredMembers: 2,
-      todayAttendance: 5,
-      monthlyIncome: 15000.00,
-      totalTrainers: 8,
-      pendingPayments: 3,
-      newMembersThisMonth: 4,
-      currency: "PHP",
-    },
-  });
-});
+    return res.json({
+      success: true,
+      data: {
+        totalMembers: Number(totalMembers[0]?.count ?? 0),
+        activeMembers: Number(activeMembers[0]?.count ?? 0),
+        inactiveMembers: Number(inactiveMembers[0]?.count ?? 0),
+        expiredMembers: Number(expiredMembers[0]?.count ?? 0),
+        todayAttendance: Number(todayAttendance[0]?.count ?? 0),
+        monthlyIncome: Number(totalRevenue[0]?.revenue ?? 0),
+        totalTrainers: Number(totalTrainers[0]?.count ?? 0),
+        pendingPayments: Number(pendingMembers[0]?.count ?? 0),
+        newMembersThisMonth: 0, // TODO: Implement new members this month logic
+        currency: "PHP",
+      },
+    });
+  } catch (err) {
+    console.error('Dashboard stats error:', err);
+    return next(err);
+  }
+}
+
+gymApiRouter.get("/dashboard/stats", getDashboardStats);
+gymApiRouter.get("/dashboard_stats", getDashboardStats);
 
 /** GET /api/performance-reports — Performance Reports */
 gymApiRouter.get("/performance-reports", async (req, res, next) => {
