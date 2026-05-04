@@ -714,14 +714,14 @@ gymApiRouter.get("/members", async (req, res, next) => {
     const limit = Number(req.query.limit) || 100;
     const offset = (page - 1) * limit;
 
-    // Simple query that works with current database structure
-    let sql = "SELECT m.*, u.profile_photo FROM members m LEFT JOIN users u ON u.member_id = m.id";
+    // Enhanced query to include user role information
+    let sql = "SELECT m.*, u.profile_photo, u.email as user_email, u.role FROM members m LEFT JOIN users u ON u.member_id = m.id";
     const params = [];
 
     if (search) {
-      sql += " WHERE (m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ?)";
+      sql += " WHERE (m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ? OR u.email LIKE ?)";
       const q = `%${search}%`;
-      params.push(q, q, q);
+      params.push(q, q, q, q);
     }
 
     // Apply status filter if specified
@@ -744,9 +744,9 @@ gymApiRouter.get("/members", async (req, res, next) => {
     const countParams = [];
     
     if (search) {
-      countSql += " WHERE (m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ?)";
+      countSql += " WHERE (m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ? OR u.email LIKE ?)";
       const q = `%${search}%`;
-      countParams.push(q, q, q);
+      countParams.push(q, q, q, q);
     }
     
     if (status && status !== 'all') {
@@ -760,20 +760,28 @@ gymApiRouter.get("/members", async (req, res, next) => {
 
     return res.json({
       success: true,
-      data: results.map(member => ({
-        id: member.id,
-        full_name: member.full_name || "",
-        phone: member.phone || "",
-        email: member.email || "",
-        status: "NO MONTHLY PLAN", // All members start as inactive
-        membership_end: null,
-        registration_date: member.registration_date,
-        profile_photo: member.profile_photo || "",
-        current_plan: "NO MONTHLY PLAN",
-        remaining_days: 0,
-        created_at: member.created_at,
-        updated_at: member.updated_at
-      })),
+      data: results.map(member => {
+        // Check if this is an admin user (admin@gym.com or role = 'admin')
+        const isAdmin = (member.user_email && member.user_email.toLowerCase() === 'admin@gym.com') || 
+                       (member.role && member.role.toLowerCase() === 'admin');
+        
+        return {
+          id: member.id,
+          full_name: member.full_name || "",
+          phone: member.phone || "",
+          email: member.email || member.user_email || "",
+          status: isAdmin ? "PERMANENT" : "NO MONTHLY PLAN", // Admin gets PERMANENT status
+          membership_end: isAdmin ? null : null, // Admin has no expiration
+          registration_date: member.registration_date,
+          profile_photo: member.profile_photo || "",
+          current_plan: isAdmin ? "ADMIN" : "NO MONTHLY PLAN", // Admin shows ADMIN plan
+          remaining_days: isAdmin ? 999999 : 0, // Admin has unlimited days
+          role: isAdmin ? "admin" : "member",
+          is_admin: isAdmin, // Flag for client-side logic
+          created_at: member.created_at,
+          updated_at: member.updated_at
+        };
+      }),
       pagination: {
         current_page: page,
         total_pages: Math.ceil(total / limit),
