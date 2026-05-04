@@ -146,31 +146,52 @@ async function handleAuthRegister(req, res, next) {
 
     const username = emailNorm;
 
-    const conn = await db.getConnection();
+    // Primary flow: project schema (members + users with member_id)
+    // Fallback flow: simple cloud schema with users(name, email, password, phone, role)
     try {
-      await conn.beginTransaction();
-      const [mResult] = await conn.query(
-        "INSERT INTO members (full_name, phone, email, status) VALUES (?, ?, ?, ?)",
-        [nameStr, phoneStr, emailNorm, "active"]
-      );
-      const memberId = mResult.insertId;
-      const [uResult] = await conn.query(
-        "INSERT INTO users (member_id, username, password, email, name, phone, role) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [memberId, username, passwordStr, emailNorm, nameStr, phoneStr, roleStr]
-      );
-      await conn.commit();
+      const conn = await db.getConnection();
+      try {
+        await conn.beginTransaction();
+        const [mResult] = await conn.query(
+          "INSERT INTO members (full_name, phone, email, status) VALUES (?, ?, ?, ?)",
+          [nameStr, phoneStr, emailNorm, "active"]
+        );
+        const memberId = mResult.insertId;
+        const [uResult] = await conn.query(
+          "INSERT INTO users (member_id, username, password, email, name, phone, role) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [memberId, username, passwordStr, emailNorm, nameStr, phoneStr, roleStr]
+        );
+        await conn.commit();
 
-      const userId = uResult.insertId;
-      const [rows] = await conn.query("SELECT * FROM users u WHERE u.id = ?", [userId]);
+        const userId = uResult.insertId;
+        const [rows] = await conn.query("SELECT * FROM users u WHERE u.id = ?", [userId]);
+        return res.status(201).json({
+          ...authSuccessBody(rows[0]),
+          message: "Registration successful",
+          total: 1,
+        });
+      } catch (err) {
+        await conn.rollback();
+        throw err;
+      } finally {
+        conn.release();
+      }
+    } catch (err) {
+      if (err.code !== "ER_BAD_FIELD_ERROR" && err.code !== "ER_NO_SUCH_TABLE") {
+        throw err;
+      }
+
+      // Fallback: cloud MySQL with users-only table
+      const [insertResult] = await db.query(
+        "INSERT INTO users (name, email, password, phone, role) VALUES (?, ?, ?, ?, ?)",
+        [nameStr, emailNorm, passwordStr, phoneStr, roleStr || "member"]
+      );
+      const [rows] = await db.query("SELECT * FROM users WHERE id = ?", [insertResult.insertId]);
       return res.status(201).json({
         ...authSuccessBody(rows[0]),
-        message: "Registration successful",
+        message: "User registered successfully!",
+        total: 1,
       });
-    } catch (err) {
-      await conn.rollback();
-      throw err;
-    } finally {
-      conn.release();
     }
   } catch (err) {
     // HTTP 200 so Retrofit treats this as successful and RegisterActivity can read
@@ -185,11 +206,21 @@ async function handleAuthRegister(req, res, next) {
     if (err.code === "ER_BAD_FIELD_ERROR") {
       return res.status(500).json({
         success: false,
-        message:
-          "Database schema is outdated. Run sql/migration_gym_dashboard_v2.sql (and sql/alter_users_register.sql if needed).",
+        message: `Database Error: ${err.message}`,
       });
     }
-    return next(err);
+    if (err.code === "ER_NO_SUCH_TABLE") {
+      return res.status(500).json({
+        success: false,
+        message: `Database Error: ${err.message}`,
+      });
+    }
+    return res.status(500).json({
+      success: false,
+      message: `Database Error: ${err.message || "Unknown database error"}`,
+      data: null,
+      total: 0,
+    });
   }
 }
 
