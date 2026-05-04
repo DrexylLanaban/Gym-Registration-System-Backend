@@ -23,18 +23,23 @@ function userPayloadForApp(userRow, token) {
       : base.username != null
         ? String(base.username).trim()
         : "";
+  const profileFromUser =
+    base.profile_photo != null
+      ? String(base.profile_photo)
+      : base.profilePhoto != null
+        ? String(base.profilePhoto)
+        : "";
+  const profileFromMember =
+    base.member_profile_image != null ? String(base.member_profile_image) : "";
+  const profilePhoto = profileFromUser || profileFromMember || "";
   return {
     id: base.id,
+    memberId: base.member_id != null ? Number(base.member_id) : null,
     name: base.name != null ? String(base.name) : "",
     email,
     role: base.role != null ? String(base.role) : "staff",
     phone: base.phone != null ? String(base.phone) : "",
-    profilePhoto:
-      base.profile_photo != null
-        ? String(base.profile_photo)
-        : base.profilePhoto != null
-          ? String(base.profilePhoto)
-          : "",
+    profilePhoto,
     token,
   };
 }
@@ -73,7 +78,10 @@ authRouter.post("/login", async (req, res, next) => {
     const passwordStr = String(password);
 
     const [rows] = await db.query(
-      "SELECT * FROM users WHERE (username = ? OR LOWER(TRIM(email)) = ?) AND password = ?",
+      `SELECT u.*, m.profile_image AS member_profile_image
+       FROM users u
+       LEFT JOIN members m ON m.id = u.member_id
+       WHERE (u.username = ? OR LOWER(TRIM(u.email)) = ?) AND u.password = ?`,
       [identifier, identifier, passwordStr]
     );
 
@@ -111,28 +119,53 @@ authRouter.post("/register", async (req, res, next) => {
 
     const username = emailNorm;
 
-    const [result] = await db.query(
-      "INSERT INTO users (username, password, email, name, phone, role) VALUES (?, ?, ?, ?, ?, ?)",
-      [username, passwordStr, emailNorm, nameStr, phoneStr, roleStr]
-    );
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [mResult] = await conn.query(
+        "INSERT INTO members (full_name, phone, email, status) VALUES (?, ?, ?, ?)",
+        [nameStr, phoneStr, emailNorm, "active"]
+      );
+      const memberId = mResult.insertId;
+      const [uResult] = await conn.query(
+        "INSERT INTO users (member_id, username, password, email, name, phone, role) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [memberId, username, passwordStr, emailNorm, nameStr, phoneStr, roleStr]
+      );
+      await conn.commit();
 
-    const [rows] = await db.query("SELECT * FROM users WHERE id = ?", [result.insertId]);
-    return res.status(201).json({
-      ...authSuccessBody(rows[0]),
-      message: "Registration successful",
-    });
+      const userId = uResult.insertId;
+      const [rows] = await conn.query(
+        `SELECT u.*, m.profile_image AS member_profile_image
+         FROM users u
+         LEFT JOIN members m ON m.id = u.member_id
+         WHERE u.id = ?`,
+        [userId]
+      );
+      return res.status(201).json({
+        ...authSuccessBody(rows[0]),
+        message: "Registration successful",
+      });
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
   } catch (err) {
+    // HTTP 200 so Retrofit treats this as successful and RegisterActivity can read
+    // apiResponse.getMessage() (4xx would skip body parsing in typical setups).
     if (err.code === "ER_DUP_ENTRY") {
-      return res.status(409).json({
+      return res.status(200).json({
         success: false,
         message: "Email already registered",
+        data: null,
       });
     }
     if (err.code === "ER_BAD_FIELD_ERROR") {
       return res.status(500).json({
         success: false,
         message:
-          "Database is missing columns for registration. Run sql/alter_users_register.sql on gym_db.",
+          "Database schema is outdated. Run sql/migration_gym_dashboard_v2.sql (and sql/alter_users_register.sql if needed).",
       });
     }
     return next(err);
