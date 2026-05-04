@@ -705,6 +705,108 @@ gymApiRouter.post("/workout-schedules", async (req, res, next) => {
   }
 });
 
+/** POST /api/trainer-bookings — Create trainer session booking */
+gymApiRouter.post("/trainer-bookings", async (req, res, next) => {
+  try {
+    const { trainer_id, trainer_name, session_type, duration, booking_date, booking_time, notes, member_name, member_id } = req.body;
+    
+    if (!trainer_id || !trainer_name || !session_type || !duration || !booking_date || !booking_time) {
+      return res.status(400).json({ success: false, message: "Missing required fields" });
+    }
+
+    // Generate receipt number
+    const now = new Date();
+    const receiptNumber = `TRS${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}${String(trainer_id).padStart(3, '0')}`;
+
+    // Calculate amount based on session type and duration
+    let amount = 0;
+    if (session_type.toLowerCase().includes('personal')) {
+      amount = duration.includes('1 hour') ? 500 : duration.includes('30') ? 300 : 700;
+    } else if (session_type.toLowerCase().includes('group')) {
+      amount = duration.includes('1 hour') ? 300 : duration.includes('30') ? 200 : 400;
+    } else if (session_type.toLowerCase().includes('consultation')) {
+      amount = duration.includes('1 hour') ? 400 : duration.includes('30') ? 250 : 550;
+    } else {
+      amount = 350; // Default
+    }
+
+    // Insert booking
+    const [result] = await db.query(
+      `INSERT INTO trainer_bookings (trainer_id, trainer_name, member_id, member_name, session_type, duration, booking_date, booking_time, notes, amount, receipt_number, status, created_at) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', NOW())`,
+      [trainer_id, trainer_name, member_id || null, member_name || 'Guest', session_type, duration, booking_date, booking_time, notes || '', amount, receiptNumber]
+    );
+
+    const bookingId = result.insertId;
+
+    // Return booking details
+    const bookingData = {
+      id: bookingId,
+      trainerId: trainer_id,
+      trainerName: trainer_name,
+      memberId: member_id || 0,
+      memberName: member_name || 'Guest',
+      sessionType: session_type,
+      duration: duration,
+      bookingDate: booking_date,
+      bookingTime: booking_time,
+      notes: notes || '',
+      amount: amount,
+      status: 'confirmed',
+      receiptNumber: receiptNumber,
+      createdAt: now.toISOString(),
+      formattedDate: now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }),
+      formattedAmount: `₱${amount.toFixed(2)}`
+    };
+
+    return res.json({ success: true, data: bookingData, message: "Trainer session booked successfully" });
+  } catch (err) {
+    console.error('Trainer booking error:', err);
+    return next(err);
+  }
+});
+
+/** GET /api/trainer-bookings/:id — Get trainer booking details */
+gymApiRouter.get("/trainer-bookings/:id", async (req, res, next) => {
+  try {
+    const bookingId = req.params.id;
+    
+    const [results] = await db.query(
+      `SELECT * FROM trainer_bookings WHERE id = ?`,
+      [bookingId]
+    );
+
+    if (results.length === 0) {
+      return res.status(404).json({ success: false, message: "Booking not found" });
+    }
+
+    const booking = results[0];
+    const bookingData = {
+      id: booking.id,
+      trainerId: booking.trainer_id,
+      trainerName: booking.trainer_name,
+      memberId: booking.member_id,
+      memberName: booking.member_name,
+      sessionType: booking.session_type,
+      duration: booking.duration,
+      bookingDate: booking.booking_date,
+      bookingTime: booking.booking_time,
+      notes: booking.notes,
+      amount: booking.amount,
+      status: booking.status,
+      receiptNumber: booking.receipt_number,
+      createdAt: booking.created_at,
+      formattedDate: new Date(booking.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }),
+      formattedAmount: `₱${booking.amount.toFixed(2)}`
+    };
+
+    return res.json({ success: true, data: bookingData, message: "Booking details fetched successfully" });
+  } catch (err) {
+    console.error('Get trainer booking error:', err);
+    return next(err);
+  }
+});
+
 /** GET /api/members — MemberListActivity */
 gymApiRouter.get("/members", async (req, res, next) => {
   try {
@@ -718,20 +820,31 @@ gymApiRouter.get("/members", async (req, res, next) => {
     let sql = "SELECT m.*, u.profile_photo, u.email as user_email, u.role FROM members m LEFT JOIN users u ON u.member_id = m.id";
     const params = [];
 
+    // Build WHERE clause
+    const whereConditions = [];
+    
     if (search) {
-      sql += " WHERE (m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ? OR u.email LIKE ?)";
+      whereConditions.push("(m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ? OR u.email LIKE ?)");
       const q = `%${search}%`;
       params.push(q, q, q, q);
     }
 
-    // Apply status filter if specified
-    if (status && status !== 'all') {
+    // Apply status filter with proper logic
+    if (status && status !== 'all' && status !== '') {
       if (status === 'active') {
-        sql += " AND 1=0"; // Return empty for now
+        whereConditions.push("(u.role = 'admin' OR (m.status = 'ACTIVE' AND m.membership_end > NOW()))");
+      } else if (status === 'inactive') {
+        // Exclude admins from inactive filter
+        whereConditions.push("(u.role != 'admin' AND (m.status = 'NO MONTHLY PLAN' OR m.status = 'INACTIVE'))");
       } else if (status === 'expired') {
-        sql += " AND 1=0"; // Return empty for now
+        // Exclude admins from expired filter
+        whereConditions.push("(u.role != 'admin' AND m.status = 'EXPIRED')");
       }
-      // For 'inactive' or 'all', show all members
+    }
+
+    // Add WHERE clause if conditions exist
+    if (whereConditions.length > 0) {
+      sql += " WHERE " + whereConditions.join(" AND ");
     }
 
     sql += " ORDER BY m.id DESC LIMIT ? OFFSET ?";
@@ -739,21 +852,20 @@ gymApiRouter.get("/members", async (req, res, next) => {
 
     const [results] = await db.query(sql, params);
 
-    // Simple count query
+    // Count query with same filters
     let countSql = "SELECT COUNT(*) as total FROM members m LEFT JOIN users u ON u.member_id = m.id";
     const countParams = [];
     
-    if (search) {
-      countSql += " WHERE (m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ? OR u.email LIKE ?)";
-      const q = `%${search}%`;
-      countParams.push(q, q, q, q);
-    }
-    
-    if (status && status !== 'all') {
-      if (status === 'active' || status === 'expired') {
-        countSql += " AND 1=0"; // Return empty for now
+    if (whereConditions.length > 0) {
+      countSql += " WHERE " + whereConditions.join(" AND ");
+      // Copy relevant params for count query
+      if (search) {
+        const q = `%${search}%`;
+        countParams.push(q, q, q, q);
       }
     }
+    
+    countParams.push(limit, offset);
 
     const [countResult] = await db.query(countSql, countParams);
     const total = countResult[0].total;
@@ -770,14 +882,14 @@ gymApiRouter.get("/members", async (req, res, next) => {
           full_name: member.full_name || "",
           phone: member.phone || "",
           email: member.email || member.user_email || "",
-          status: isAdmin ? "PERMANENT" : "NO MONTHLY PLAN", // Admin gets PERMANENT status
-          membership_end: isAdmin ? null : null, // Admin has no expiration
+          status: isAdmin ? "PERMANENT" : (member.status || "NO MONTHLY PLAN"),
+          membership_end: member.membership_end,
           registration_date: member.registration_date,
           profile_photo: member.profile_photo || "",
-          current_plan: isAdmin ? "ADMIN" : "NO MONTHLY PLAN", // Admin shows ADMIN plan
-          remaining_days: isAdmin ? 999999 : 0, // Admin has unlimited days
+          current_plan: isAdmin ? "ADMIN" : (member.membership_plan || "NO MONTHLY PLAN"),
+          remaining_days: isAdmin ? 999999 : 0,
           role: isAdmin ? "admin" : "member",
-          is_admin: isAdmin, // Flag for client-side logic
+          is_admin: isAdmin,
           created_at: member.created_at,
           updated_at: member.updated_at
         };
