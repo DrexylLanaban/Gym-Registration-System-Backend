@@ -6,6 +6,22 @@ const { handleAuthLogin, handleAuthRegister } = require("./auth");
 const gymApiRouter = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
+function normalizeTrainerRow(row) {
+  const fullName = row.full_name != null ? String(row.full_name).trim() : "";
+  const parts = fullName.split(/\s+/).filter(Boolean);
+  const firstName = parts.length > 0 ? parts[0] : "";
+  const lastName = parts.length > 1 ? parts.slice(1).join(" ") : "";
+  return {
+    ...row,
+    first_name: firstName,
+    last_name: lastName,
+    description: row.description != null ? String(row.description) : "",
+    status: row.status != null ? String(row.status) : "active",
+    member_count: row.member_count != null ? Number(row.member_count) : 0,
+    image_url: row.image_url != null ? String(row.image_url) : row.profile_photo ?? "",
+  };
+}
+
 /** POST /api/login — ApiService: api/login (email or username + password, ApiResponse shape) */
 gymApiRouter.post("/login", handleAuthLogin);
 
@@ -74,7 +90,104 @@ gymApiRouter.get("/payments", async (req, res, next) => {
 /** GET /api/dashboard/stats — MainActivity (Retrofit may use api/dashboard_stats) */
 async function getDashboardStats(req, res, next) {
   try {
-    const [rows] = await db.query("SELECT * FROM dashboard_summary");
+    // Live admin stats:
+    // - pending: member users without any paid payment yet
+    // - total members: member users with at least one paid payment
+    // This matches the app flow where a newly registered user is pending until first payment.
+    const [rows] = await db.query(
+      `SELECT
+         (
+           SELECT COUNT(*)
+           FROM users u
+           WHERE u.role = 'member'
+             AND EXISTS (
+               SELECT 1
+               FROM payments p
+               WHERE p.member_id = u.member_id
+                 AND p.status = 'paid'
+             )
+         ) AS total_members,
+         (
+           SELECT COUNT(*)
+           FROM users u
+           JOIN members m ON m.id = u.member_id
+           WHERE u.role = 'member'
+             AND m.status = 'active'
+             AND EXISTS (
+               SELECT 1
+               FROM payments p
+               WHERE p.member_id = u.member_id
+                 AND p.status = 'paid'
+             )
+         ) AS active_members,
+         (
+           SELECT COUNT(*)
+           FROM users u
+           JOIN members m ON m.id = u.member_id
+           WHERE u.role = 'member'
+             AND m.status = 'inactive'
+             AND EXISTS (
+               SELECT 1
+               FROM payments p
+               WHERE p.member_id = u.member_id
+                 AND p.status = 'paid'
+             )
+         ) AS inactive_members,
+         (
+           SELECT COUNT(*)
+           FROM users u
+           JOIN members m ON m.id = u.member_id
+           WHERE u.role = 'member'
+             AND m.status = 'expired'
+             AND EXISTS (
+               SELECT 1
+               FROM payments p
+               WHERE p.member_id = u.member_id
+                 AND p.status = 'paid'
+             )
+         ) AS expired_members,
+         (
+           SELECT COUNT(*)
+           FROM attendance a
+           WHERE DATE(a.check_in) = CURDATE()
+         ) AS today_attendance,
+         (
+           SELECT COALESCE(SUM(p.amount), 0)
+           FROM payments p
+           WHERE p.status = 'paid'
+             AND MONTH(p.payment_date) = MONTH(CURDATE())
+             AND YEAR(p.payment_date) = YEAR(CURDATE())
+         ) AS monthly_income,
+         (
+           SELECT COUNT(DISTINCT TRIM(t.full_name))
+           FROM trainers
+           WHERE TRIM(COALESCE(t.full_name, '')) <> ''
+         ) AS total_trainers,
+         (
+           SELECT COUNT(*)
+           FROM users u
+           WHERE u.role = 'member'
+             AND NOT EXISTS (
+               SELECT 1
+               FROM payments p
+               WHERE p.member_id = u.member_id
+                 AND p.status = 'paid'
+             )
+         ) AS pending_payments,
+         (
+           SELECT COUNT(*)
+           FROM users u
+           WHERE u.role = 'member'
+             AND EXISTS (
+               SELECT 1
+               FROM payments p
+               WHERE p.member_id = u.member_id
+                 AND p.status = 'paid'
+                 AND MONTH(p.payment_date) = MONTH(CURDATE())
+                 AND YEAR(p.payment_date) = YEAR(CURDATE())
+             )
+         ) AS new_members_this_month`
+    );
     const r = rows[0] || {};
     return res.json({
       success: true,
@@ -148,8 +261,24 @@ gymApiRouter.post("/workout-schedules", async (req, res, next) => {
 /** GET /api/trainers — TrainerListActivity */
 gymApiRouter.get("/trainers", async (req, res, next) => {
   try {
-    const [results] = await db.query("SELECT * FROM trainers ORDER BY id");
-    return res.json(results);
+    const search = req.query.search != null ? String(req.query.search).trim() : "";
+    let sql = "SELECT * FROM trainers";
+    const params = [];
+    if (search) {
+      sql += " WHERE full_name LIKE ? OR specialization LIKE ?";
+      const q = `%${search}%`;
+      params.push(q, q);
+    }
+    sql += " ORDER BY id";
+
+    const [results] = await db.query(sql, params);
+    const normalized = results.map(normalizeTrainerRow);
+    return res.json({
+      success: true,
+      data: normalized,
+      total: normalized.length,
+      message: "Trainers fetched",
+    });
   } catch (err) {
     return next(err);
   }
@@ -166,7 +295,7 @@ gymApiRouter.get("/get_trainer", async (req, res, next) => {
     if (rows.length === 0) {
       return res.status(404).json({ success: false, message: "Trainer not found" });
     }
-    return res.json({ success: true, data: rows[0] });
+    return res.json({ success: true, data: normalizeTrainerRow(rows[0]) });
   } catch (err) {
     return next(err);
   }
@@ -195,7 +324,9 @@ gymApiRouter.post("/add_trainer", async (req, res, next) => {
     );
 
     const [rows] = await db.query("SELECT * FROM trainers WHERE id = ?", [result.insertId]);
-    return res.status(201).json({ success: true, data: rows[0], message: "Trainer added successfully" });
+    return res
+      .status(201)
+      .json({ success: true, data: normalizeTrainerRow(rows[0]), message: "Trainer added successfully" });
   } catch (err) {
     return next(err);
   }
@@ -238,7 +369,11 @@ gymApiRouter.post("/update_trainer", async (req, res, next) => {
     if (rows.length === 0) {
       return res.status(404).json({ success: false, message: "Trainer not found" });
     }
-    return res.json({ success: true, data: rows[0], message: "Trainer updated successfully" });
+    return res.json({
+      success: true,
+      data: normalizeTrainerRow(rows[0]),
+      message: "Trainer updated successfully",
+    });
   } catch (err) {
     return next(err);
   }
@@ -264,7 +399,11 @@ gymApiRouter.post("/upload_trainer_photo", upload.single("photo"), async (req, r
     if (rows.length === 0) {
       return res.status(404).json({ success: false, message: "Trainer not found" });
     }
-    return res.json({ success: true, data: rows[0], message: "Trainer photo uploaded successfully" });
+    return res.json({
+      success: true,
+      data: normalizeTrainerRow(rows[0]),
+      message: "Trainer photo uploaded successfully",
+    });
   } catch (err) {
     return next(err);
   }
