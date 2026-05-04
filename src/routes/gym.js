@@ -1,35 +1,14 @@
 const express = require("express");
 const { db } = require("../services/db");
+const { handleAuthLogin, handleAuthRegister } = require("./auth");
 
 const gymApiRouter = express.Router();
 
-function stripPassword(row) {
-  if (!row) return row;
-  const { password: _p, ...rest } = row;
-  return rest;
-}
+/** POST /api/login — ApiService: api/login (email or username + password, ApiResponse shape) */
+gymApiRouter.post("/login", handleAuthLogin);
 
-/** POST /api/login — LoginActivity */
-gymApiRouter.post("/login", async (req, res, next) => {
-  try {
-    const { username, password } = req.body || {};
-    if (!username || password === undefined) {
-      return res.status(400).json({ success: false, message: "username and password required" });
-    }
-
-    const [rows] = await db.query("SELECT * FROM users WHERE username = ? AND password = ?", [
-      username,
-      password,
-    ]);
-
-    if (rows.length > 0) {
-      return res.json({ success: true, user: stripPassword(rows[0]) });
-    }
-    return res.status(401).json({ success: false, message: "Invalid credentials" });
-  } catch (err) {
-    return next(err);
-  }
-});
+/** POST /api/register — ApiService: api/register */
+gymApiRouter.post("/register", handleAuthRegister);
 
 /** GET /api/members — MemberListActivity */
 gymApiRouter.get("/members", async (req, res, next) => {

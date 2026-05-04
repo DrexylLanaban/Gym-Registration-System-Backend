@@ -33,7 +33,7 @@ function userPayloadForApp(userRow, token) {
     base.member_profile_image != null ? String(base.member_profile_image) : "";
   const profilePhoto = profileFromUser || profileFromMember || "";
   return {
-    id: base.id,
+    id: Number(base.id),
     memberId: base.member_id != null ? Number(base.member_id) : null,
     name: base.name != null ? String(base.name) : "",
     email,
