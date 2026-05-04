@@ -11,14 +11,34 @@ function normalizeTrainerRow(row) {
   const parts = fullName.split(/\s+/).filter(Boolean);
   const firstName = parts.length > 0 ? parts[0] : "";
   const lastName = parts.length > 1 ? parts.slice(1).join(" ") : "";
+  
+  // Handle profile photo - prioritize base64 data URLs
+  let profilePhoto = "";
+  if (row.profile_photo && row.profile_photo.startsWith && row.profile_photo.startsWith('data:')) {
+    profilePhoto = row.profile_photo;
+  } else if (row.image_url && row.image_url.startsWith && row.image_url.startsWith('data:')) {
+    profilePhoto = row.image_url;
+  } else if (row.profile_photo) {
+    profilePhoto = row.profile_photo;
+  } else if (row.image_url) {
+    profilePhoto = row.image_url;
+  }
+  
   return {
-    ...row,
+    id: row.id,
+    full_name: fullName,
     first_name: firstName,
     last_name: lastName,
+    phone: row.phone || "",
+    email: row.email || "",
+    specialization: row.specialization || "",
     description: row.description != null ? String(row.description) : "",
     status: row.status != null ? String(row.status) : "active",
     member_count: row.member_count != null ? Number(row.member_count) : 0,
-    image_url: row.image_url != null ? String(row.image_url) : row.profile_photo ?? "",
+    profile_photo: profilePhoto,
+    image_url: profilePhoto,
+    created_at: row.created_at,
+    updated_at: row.updated_at
   };
 }
 
@@ -31,8 +51,84 @@ gymApiRouter.post("/register", handleAuthRegister);
 /** GET /api/members — MemberListActivity */
 gymApiRouter.get("/members", async (req, res, next) => {
   try {
-    const [results] = await db.query("SELECT * FROM members ORDER BY id");
-    return res.json(results);
+    const search = req.query.search != null ? String(req.query.search).trim() : "";
+    const status = req.query.status != null ? String(req.query.status).trim() : "";
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 100;
+    const offset = (page - 1) * limit;
+
+    let sql = `
+      SELECT m.*, u.profile_photo, 
+             CASE 
+               WHEN EXISTS(SELECT 1 FROM payments p WHERE p.member_id = m.id AND p.status = 'paid') THEN 'paid'
+               ELSE 'pending'
+             END as payment_status,
+             (SELECT MAX(p.payment_date) FROM payments p WHERE p.member_id = m.id AND p.status = 'paid') as last_payment_date
+      FROM members m
+      LEFT JOIN users u ON u.member_id = m.id
+    `;
+    const params = [];
+
+    if (search) {
+      sql += " WHERE m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ?";
+      const q = `%${search}%`;
+      params.push(q, q, q);
+    }
+
+    if (status) {
+      sql += search ? " AND" : " WHERE";
+      sql += " m.status = ?";
+      params.push(status);
+    }
+
+    sql += " ORDER BY m.id DESC LIMIT ? OFFSET ?";
+    params.push(limit, offset);
+
+    const [results] = await db.query(sql, params);
+
+    // Get total count for pagination
+    let countSql = "SELECT COUNT(*) as total FROM members m";
+    const countParams = [];
+    
+    if (search) {
+      countSql += " WHERE m.full_name LIKE ? OR m.email LIKE ? OR m.phone LIKE ?";
+      const q = `%${search}%`;
+      countParams.push(q, q, q);
+    }
+    
+    if (status) {
+      countSql += search ? " AND" : " WHERE";
+      countSql += " m.status = ?";
+      countParams.push(status);
+    }
+
+    const [countResult] = await db.query(countSql, countParams);
+    const total = countResult[0].total;
+
+    return res.json({
+      success: true,
+      data: results.map(member => ({
+        id: member.id,
+        full_name: member.full_name || "",
+        phone: member.phone || "",
+        email: member.email || "",
+        status: member.status || "active",
+        membership_end: member.membership_end,
+        registration_date: member.registration_date,
+        profile_photo: member.profile_photo || "",
+        payment_status: member.payment_status || "pending",
+        last_payment_date: member.last_payment_date,
+        created_at: member.created_at,
+        updated_at: member.updated_at
+      })),
+      pagination: {
+        current_page: page,
+        total_pages: Math.ceil(total / limit),
+        total_records: total,
+        limit: limit
+      },
+      message: "Members fetched successfully"
+    });
   } catch (err) {
     return next(err);
   }
@@ -211,6 +307,97 @@ async function getDashboardStats(req, res, next) {
 
 gymApiRouter.get("/dashboard/stats", getDashboardStats);
 gymApiRouter.get("/dashboard_stats", getDashboardStats);
+
+/** GET /api/performance-reports — Performance Reports */
+gymApiRouter.get("/performance-reports", async (req, res, next) => {
+  try {
+    const period = req.query.period || 'monthly'; // daily, weekly, monthly, yearly
+    
+    let dateFormat, groupBy;
+    switch(period) {
+      case 'daily':
+        dateFormat = '%Y-%m-%d';
+        groupBy = 'DATE(p.payment_date)';
+        break;
+      case 'weekly':
+        dateFormat = '%Y-%u';
+        groupBy = 'YEARWEEK(p.payment_date)';
+        break;
+      case 'yearly':
+        dateFormat = '%Y';
+        groupBy = 'YEAR(p.payment_date)';
+        break;
+      default: // monthly
+        dateFormat = '%Y-%m';
+        groupBy = 'DATE_FORMAT(p.payment_date, "%Y-%m")';
+    }
+
+    const [revenueData] = await db.query(`
+      SELECT 
+        ${groupBy} as period,
+        COUNT(*) as transaction_count,
+        COALESCE(SUM(p.amount), 0) as revenue,
+        COUNT(DISTINCT p.member_id) as unique_members
+      FROM payments p
+      WHERE p.status = 'paid' 
+        AND p.payment_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+      GROUP BY ${groupBy}
+      ORDER BY period DESC
+      LIMIT 12
+    `);
+
+    const [membershipGrowth] = await db.query(`
+      SELECT 
+        ${groupBy} as period,
+        COUNT(*) as new_members
+      FROM members m
+      WHERE m.created_at >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+      GROUP BY ${groupBy}
+      ORDER BY period DESC
+      LIMIT 12
+    `);
+
+    const [attendanceData] = await db.query(`
+      SELECT 
+        ${groupBy} as period,
+        COUNT(*) as total_attendance,
+        COUNT(DISTINCT a.member_id) as unique_attendees
+      FROM attendance a
+      WHERE a.check_in >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+      GROUP BY ${groupBy}
+      ORDER BY period DESC
+      LIMIT 12
+    `);
+
+    const [trainerPerformance] = await db.query(`
+      SELECT 
+        t.id,
+        t.full_name,
+        t.specialization,
+        COUNT(DISTINCT ws.member_id) as total_clients,
+        COUNT(ws.id) as total_sessions
+      FROM trainers t
+      LEFT JOIN workout_schedules ws ON t.id = ws.trainer_id
+      GROUP BY t.id, t.full_name, t.specialization
+      ORDER BY total_clients DESC, total_sessions DESC
+    `);
+
+    return res.json({
+      success: true,
+      data: {
+        revenue_trends: revenueData,
+        membership_growth: membershipGrowth,
+        attendance_trends: attendanceData,
+        trainer_performance: trainerPerformance,
+        period: period,
+        currency: "PHP"
+      },
+      message: "Performance reports fetched successfully"
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
 
 /** GET /api/workout-schedules?member_id= — member workout list */
 gymApiRouter.get("/workout-schedules", async (req, res, next) => {
