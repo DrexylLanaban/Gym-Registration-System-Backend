@@ -64,8 +64,8 @@ function normalizeLoginIdentifier(body) {
   return "";
 }
 
-/** POST /api/auth/login — Android LoginActivity (JSON uses email + password) */
-authRouter.post("/login", async (req, res, next) => {
+/** POST /api/auth/login — also mounted at /login and /login.php for legacy Retrofit paths */
+async function handleAuthLogin(req, res, next) {
   try {
     const { password } = req.body || {};
     const identifier = normalizeLoginIdentifier(req.body);
@@ -93,10 +93,12 @@ authRouter.post("/login", async (req, res, next) => {
   } catch (err) {
     return next(err);
   }
-});
+}
 
-/** POST /api/auth/register — Android RegisterActivity */
-authRouter.post("/register", async (req, res, next) => {
+authRouter.post("/login", handleAuthLogin);
+
+/** POST /api/auth/register — also mounted at /register and /register.php */
+async function handleAuthRegister(req, res, next) {
   try {
     const { email, password, name, phone, role } = req.body || {};
     const emailNorm = email != null ? String(email).trim().toLowerCase() : "";
@@ -170,6 +172,8 @@ authRouter.post("/register", async (req, res, next) => {
     }
     return next(err);
   }
-});
+}
 
-module.exports = { authRouter };
+authRouter.post("/register", handleAuthRegister);
+
+module.exports = { authRouter, handleAuthLogin, handleAuthRegister };
