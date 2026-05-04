@@ -75,6 +75,220 @@ gymApiRouter.get("/membership-plans", async (req, res, next) => {
   }
 });
 
+/** GET /api/membership-status/:id — Get real-time membership status */
+gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
+  try {
+    const memberId = Number(req.params.id);
+    if (!Number.isFinite(memberId)) {
+      return res.status(400).json({ success: false, message: "Valid member ID required" });
+    }
+
+    // Use stored procedure for real-time status
+    const [results] = await db.query("CALL GetRealTimeMembershipStatus(?)", [memberId]);
+    
+    if (results.length === 0) {
+      return res.status(404).json({ success: false, message: "Member not found" });
+    }
+
+    const member = results[0];
+    
+    return res.json({
+      success: true,
+      data: {
+        id: member.id,
+        full_name: member.full_name,
+        member_code: member.member_code,
+        current_status: member.current_status,
+        display_status: member.display_status,
+        current_plan: member.current_plan,
+        plan_price: member.plan_price ? Number(member.plan_price) : 0,
+        start_date: member.start_date,
+        expiration_date: member.expiration_date,
+        remaining_minutes: member.remaining_minutes || 0,
+        remaining_seconds: member.remaining_seconds || 0,
+        user_type: member.user_type,
+        membership_status: member.membership_status
+      },
+      message: "Membership status retrieved successfully"
+    });
+  } catch (err) {
+    console.error('Membership status error:', err);
+    return next(err);
+  }
+});
+
+/** POST /api/memberships/activate — Activate membership with custom duration */
+gymApiRouter.post("/memberships/activate", async (req, res, next) => {
+  try {
+    const { member_id, plan_id, amount, payment_method, duration_minutes } = req.body || {};
+    
+    if (!member_id || !plan_id || !amount) {
+      return res.status(400).json({ success: false, message: "member_id, plan_id, and amount are required" });
+    }
+
+    // Use stored procedure with custom duration support
+    const [results] = await db.query("CALL ActivateMembership(?, ?, ?, ?, ?, ?)", [
+      member_id, plan_id, amount, payment_method, duration_minutes
+    ]);
+    
+    if (results.length === 0) {
+      return res.status(400).json({ success: false, message: "Membership activation failed" });
+    }
+
+    const result = results[0];
+    
+    return res.json({
+      success: true,
+      data: {
+        action: result.action,
+        member_name: result.member_name,
+        plan_name: result.plan_name,
+        start_date: result.start_date,
+        expiration_date: result.expiration_date,
+        remaining_minutes: result.remaining_minutes
+      },
+      message: "Membership activated successfully"
+    });
+  } catch (err) {
+    console.error('Membership activation error:', err);
+    return next(err);
+  }
+});
+
+/** GET /api/membership-timer/:id — Get countdown timer */
+gymApiRouter.get("/membership-timer/:id", async (req, res, next) => {
+  try {
+    const memberId = Number(req.params.id);
+    if (!Number.isFinite(memberId)) {
+      return res.status(400).json({ success: false, message: "Valid member ID required" });
+    }
+
+    // Get real-time membership data
+    const [results] = await db.query(`
+      SELECT 
+        ms.expiration_date,
+        TIMESTAMPDIFF(SECOND, NOW(), ms.expiration_date) as remaining_seconds,
+        TIMESTAMPDIFF(MINUTE, NOW(), ms.expiration_date) as remaining_minutes,
+        TIMESTAMPDIFF(HOUR, NOW(), ms.expiration_date) as remaining_hours,
+        TIMESTAMPDIFF(DAY, NOW(), ms.expiration_date) as remaining_days,
+        CASE 
+          WHEN ms.expiration_date > NOW() THEN 'active'
+          WHEN ms.expiration_date <= NOW() THEN 'expired'
+          ELSE 'inactive'
+        END as status
+      FROM memberships ms
+      JOIN users u ON u.id = ms.user_id
+      WHERE u.member_id = ? AND ms.status = 'active'
+      ORDER BY ms.created_at DESC LIMIT 1
+    `, [memberId]);
+
+    if (results.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          remaining_seconds: 0,
+          remaining_minutes: 0,
+          remaining_hours: 0,
+          remaining_days: 0,
+          status: 'inactive',
+          expiration_date: null,
+          is_expired: false,
+          formatted_time: 'No active membership'
+        }
+      });
+    }
+
+    const membership = results[0];
+    const isExpired = membership.remaining_seconds <= 0;
+    
+    return res.json({
+      success: true,
+      data: {
+        remaining_seconds: Math.max(0, membership.remaining_seconds),
+        remaining_minutes: Math.max(0, membership.remaining_minutes),
+        remaining_hours: Math.max(0, membership.remaining_hours),
+        remaining_days: Math.max(0, membership.remaining_days),
+        status: isExpired ? 'expired' : 'active',
+        expiration_date: membership.expiration_date,
+        is_expired: isExpired,
+        formatted_time: isExpired ? 'Membership expired' : 
+          `${membership.remaining_days}d ${membership.remaining_hours % 24}h ${membership.remaining_minutes % 60}m`
+      }
+    });
+  } catch (err) {
+    console.error('Membership timer error:', err);
+    return next(err);
+  }
+});
+
+/** POST /api/test-membership — Create 2-minute test membership */
+gymApiRouter.post("/test-membership", async (req, res, next) => {
+  try {
+    const { member_id } = req.body || {};
+    
+    if (!member_id) {
+      return res.status(400).json({ success: false, message: "member_id is required" });
+    }
+
+    // Get the 2-minute test plan
+    const [planRows] = await db.query("SELECT * FROM membership_plans WHERE plan_name = 'Test 2-Minute' AND is_active = TRUE");
+    
+    if (planRows.length === 0) {
+      return res.status(404).json({ success: false, message: "Test plan not found" });
+    }
+
+    const plan = planRows[0];
+
+    // Activate 2-minute membership using stored procedure
+    const [results] = await db.query("CALL ActivateMembership(?, ?, ?, ?, 'system', 2)", [
+      member_id, plan.id, plan.price, 'system'
+    ]);
+    
+    if (results.length === 0) {
+      return res.status(400).json({ success: false, message: "Test membership activation failed" });
+    }
+
+    const result = results[0];
+    
+    return res.json({
+      success: true,
+      data: {
+        action: result.action,
+        member_name: result.member_name,
+        plan_name: result.plan_name,
+        start_date: result.start_date,
+        expiration_date: result.expiration_date,
+        remaining_minutes: result.remaining_minutes,
+        test_mode: true,
+        message: "Test membership activated for 2 minutes"
+      },
+      message: "Test membership created successfully"
+    });
+  } catch (err) {
+    console.error('Test membership error:', err);
+    return next(err);
+  }
+});
+
+/** POST /api/process-expirations — Process expired memberships manually */
+gymApiRouter.post("/process-expirations", async (req, res, next) => {
+  try {
+    const [results] = await db.query("CALL ProcessExpiredMemberships()");
+    
+    return res.json({
+      success: true,
+      data: {
+        processed_count: results[0]?.expired_count || 0,
+        message: "Expired memberships processed successfully"
+      },
+      message: "Expiration processing completed"
+    });
+  } catch (err) {
+    console.error('Process expirations error:', err);
+    return next(err);
+  }
+});
+
 /** POST /api/payments — Process payment */
 gymApiRouter.post("/payments", async (req, res, next) => {
   try {
