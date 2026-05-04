@@ -49,7 +49,7 @@ gymApiRouter.post("/login", handleAuthLogin);
 gymApiRouter.post("/register", handleAuthRegister);
 
 /** GET /api/membership-plans — Get all membership plans */
-gymApiRouter.get("/membership-plans", async (req, res, next) => {
+gymApiRouter.get("/membership-plans", (req, res) => {
   try {
     // Return hardcoded plans for now since database structure might not be updated
     const plans = [
@@ -110,7 +110,7 @@ gymApiRouter.get("/membership-plans", async (req, res, next) => {
     });
   } catch (err) {
     console.error('Membership plans error:', err);
-    return next(err);
+    return res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
