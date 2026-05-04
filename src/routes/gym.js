@@ -12,16 +12,13 @@ function normalizeTrainerRow(row) {
   const firstName = parts.length > 0 ? parts[0] : "";
   const lastName = parts.length > 1 ? parts.slice(1).join(" ") : "";
   
-  // Handle profile photo - prioritize base64 data URLs
-  let profilePhoto = "";
-  if (row.profile_photo && row.profile_photo.startsWith && row.profile_photo.startsWith('data:')) {
-    profilePhoto = row.profile_photo;
-  } else if (row.image_url && row.image_url.startsWith && row.image_url.startsWith('data:')) {
-    profilePhoto = row.image_url;
-  } else if (row.profile_photo) {
-    profilePhoto = row.profile_photo;
-  } else if (row.image_url) {
-    profilePhoto = row.image_url;
+  // Simple base64 placeholder for all trainers to ensure Android compatibility
+  const placeholderImage = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/2wBDAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwA/8A8A";
+  
+  // Use base64 if available, otherwise use placeholder
+  let profilePhoto = placeholderImage;
+  if (row.profile_photo && String(row.profile_photo).startsWith('data:image/')) {
+    profilePhoto = String(row.profile_photo);
   }
   
   return {
@@ -517,7 +514,7 @@ gymApiRouter.post("/attendance/check-in", async (req, res, next) => {
     const [attendanceResult] = await db.query(`
       INSERT INTO attendance (member_id, member_name, member_code, profile_photo, status)
       VALUES (?, ?, ?, ?, 'checked_in')
-    `, [member_id, member.full_name, member.member_code, member.profile_photo]);
+    `, [member_id, member.full_name, member.member_code || `MEM${String(member_id).padStart(6, '0')}`, member.profile_photo]);
 
     return res.json({
       success: true,
@@ -525,7 +522,7 @@ gymApiRouter.post("/attendance/check-in", async (req, res, next) => {
         id: attendanceResult.insertId,
         memberId: member_id,
         memberName: member.full_name,
-        memberCode: member.member_code,
+        memberCode: member.member_code || `MEM${String(member_id).padStart(6, '0')}`,
         profilePhoto: member.profile_photo,
         checkIn: new Date().toISOString(),
         checkOut: null,
@@ -537,6 +534,50 @@ gymApiRouter.post("/attendance/check-in", async (req, res, next) => {
     });
   } catch (err) {
     console.error('Check-in error:', err);
+    return next(err);
+  }
+});
+
+/** GET /api/attendance — Get attendance records for list */
+gymApiRouter.get("/attendance", async (req, res, next) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const member_id = req.query.member_id;
+    
+    let sql = "SELECT * FROM attendance WHERE DATE(check_in) = ?";
+    const params = [date];
+    
+    if (member_id) {
+      sql += " AND member_id = ?";
+      params.push(member_id);
+    }
+    
+    sql += " ORDER BY check_in DESC";
+
+    const [results] = await db.query(sql, params);
+
+    return res.json({
+      success: true,
+      data: results.map(record => ({
+        id: record.id,
+        memberId: record.member_id,
+        memberName: record.member_name,
+        memberCode: record.member_code || `MEM${String(record.member_id).padStart(6, '0')}`,
+        profilePhoto: record.profile_photo,
+        checkIn: record.check_in,
+        checkOut: record.check_out,
+        date: record.check_in.toString().split('T')[0],
+        durationMinutes: record.check_out ? 
+          Math.floor((new Date(record.check_out) - new Date(record.check_in)) / (1000 * 60)) : 0,
+        status: record.status,
+        formattedDuration: record.check_out ? 
+          `${Math.floor((new Date(record.check_out) - new Date(record.check_in)) / (1000 * 60))} minutes` : 
+          'In progress'
+      })),
+      message: "Attendance records fetched successfully"
+    });
+  } catch (err) {
+    console.error('Attendance list error:', err);
     return next(err);
   }
 });
