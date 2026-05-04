@@ -12,14 +12,11 @@ function normalizeTrainerRow(row) {
   const firstName = parts.length > 0 ? parts[0] : "";
   const lastName = parts.length > 1 ? parts.slice(1).join(" ") : "";
   
-  // Simple base64 placeholder for all trainers to ensure Android compatibility
+  // Base64 placeholder image for all trainers to ensure Android compatibility
   const placeholderImage = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/2wBDAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwA/8A8A";
   
-  // Use base64 if available, otherwise use placeholder
+  // Always use base64 placeholder to ensure Android compatibility
   let profilePhoto = placeholderImage;
-  if (row.profile_photo && String(row.profile_photo).startsWith('data:image/')) {
-    profilePhoto = String(row.profile_photo);
-  }
   
   return {
     id: row.id,
