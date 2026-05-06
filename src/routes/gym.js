@@ -100,174 +100,89 @@ gymApiRouter.get("/membership-plans", (req, res) => {
   }
 });
 
-/** GET /api/membership-status/:id — Get real-time membership status */
+/** GET /api/membership-status/:id — FIXED */
 gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
   try {
-    const memberId = Number(req.params.id);
-    if (!Number.isFinite(memberId)) {
-      return res.status(400).json({ success: false, message: "Valid member ID required" });
-    }
-
-    // Use direct SQL query for real-time status with balance included
-    console.log('Fetching membership status for member_id:', memberId);
-    const [results] = await db.query(
-      `SELECT m.*, 
-              m.balance,
-              CASE 
-                WHEN m.current_status = 'active' AND m.expiration_date > NOW() 
-                THEN TIMESTAMPDIFF(MINUTE, NOW(), m.expiration_date)
-                ELSE 0 
-              END as remaining_minutes,
-              CASE 
-                WHEN m.expiration_date IS NOT NULL 
-                THEN m.expiration_date 
-                ELSE NULL 
-              END as expiration_date
-       FROM members m 
-       WHERE m.id = ?`,
-      [memberId]
-    );
-    console.log('Membership status results:', results[0]);
+    const memberId = req.params.id;
+    const [results] = await db.query("SELECT * FROM members WHERE id = ?", [memberId]);
     
-    if (results.length === 0) {
-      return res.status(404).json({ success: false, message: "Member not found" });
-    }
+    if (results.length === 0) return res.status(404).json({ success: false, message: "Member not found" });
 
     const member = results[0];
+    const now = new Date();
+    const expiration = member.expiration_date ? new Date(member.expiration_date) : null;
     
+    // Logic: If active but time ran out, it's expired. If no date, it's inactive.
+    let status = member.current_status || 'inactive';
+    let display = member.display_status || 'INACTIVE';
+    
+    if (status === 'active' && expiration && now > expiration) {
+      status = 'expired';
+      display = 'EXPIRED';
+    } else if (!expiration && status !== 'active') {
+      status = 'inactive';
+      display = 'INACTIVE';
+    }
+
     return res.json({
       success: true,
       data: {
         id: member.id,
         full_name: member.full_name,
-        member_code: member.member_code,
-        current_status: member.current_status,
-        display_status: member.display_status,
-        current_plan: member.current_plan,
-        plan_price: member.plan_price ? Number(member.plan_price) : 0,
-        start_date: member.start_date,
+        current_status: status,
+        display_status: display,
+        balance: Number(member.balance || 0), // THIS IS WHAT THE APP NEEDS
+        wallet_balance: Number(member.balance || 0), 
         expiration_date: member.expiration_date,
-        remaining_minutes: member.remaining_minutes || 0,
-        remaining_seconds: member.remaining_seconds || 0,
-        user_type: member.user_type,
-        membership_status: member.membership_status,
-        balance: member.balance != null ? Number(member.balance) : 5.00
+        remaining_minutes: (expiration && expiration > now) ? Math.floor((expiration - now) / 60000) : 0
       },
-      message: "Membership status retrieved successfully"
+      message: "Status retrieved"
     });
-  } catch (err) {
-    console.error('Membership status error:', err);
-    return next(err);
-  }
+  } catch (err) { next(err); }
 });
 
-/** POST /api/memberships/activate — Activate membership with custom duration */
+/** POST /api/memberships/activate — FIXED */
 gymApiRouter.post("/memberships/activate", async (req, res, next) => {
   try {
-    const { member_id, user_id, plan_id, amount, payment_method, duration_minutes } = req.body || {};
-    
-    console.log('Membership activation request body:', req.body);
-    
-    // Accept either member_id or user_id
-    let actualMemberId = member_id;
-    if (!actualMemberId && user_id) {
-      // Look up member_id from user_id
-      console.log('Looking up member_id for user_id:', user_id);
-      const [userRows] = await db.query("SELECT member_id FROM users WHERE id = ?", [user_id]);
-      console.log('User rows found:', userRows.length);
-      if (userRows.length > 0 && userRows[0].member_id) {
-        actualMemberId = userRows[0].member_id;
-        console.log('Found member_id:', actualMemberId);
-      } else {
-        console.log('No member_id found for user_id:', user_id);
-        return res.status(400).json({ success: false, message: "User not linked to a member account" });
-      }
-    }
-    
-    if (!actualMemberId || !plan_id || !amount) {
-      return res.status(400).json({ success: false, message: "member_id, plan_id, and amount are required" });
-    }
-
-    // Use direct SQL queries instead of stored procedure
-    const finalDuration = duration_minutes || 43200;
-    console.log('Final duration:', finalDuration, 'Type:', typeof finalDuration);
-    
-    // Start transaction
+    const { member_id, amount, plan_id, duration_minutes, payment_method } = req.body;
     const conn = await db.getConnection();
+    
     try {
       await conn.beginTransaction();
-      
-      // Check balance if payment_method is 'balance'
-      if (payment_method === 'balance') {
-        const [rows] = await conn.query("SELECT balance FROM members WHERE id = ?", [actualMemberId]);
-        if (rows.length === 0 || rows[0].balance < amount) {
-          throw new Error("Insufficient balance. You need " + amount + " PHP.");
-        }
-        // Deduct balance
-        await conn.query("UPDATE members SET balance = balance - ? WHERE id = ?", [amount, actualMemberId]);
+
+      // 1. Check and deduct balance (The "Temple Wallet" logic)
+      const [m] = await conn.query("SELECT balance FROM members WHERE id = ?", [member_id]);
+      const currentBalance = m[0] ? Number(m[0].balance) : 0;
+
+      if (currentBalance < amount) {
+        throw new Error(`Insufficient balance. You have ₱${currentBalance}`);
       }
 
-      // Create payment record without plan_id column
-      const [paymentResult] = await conn.query(
-        "INSERT INTO payments (member_id, amount, payment_method, processed_by, status) VALUES (?, ?, ?, ?, ?)",
-        [actualMemberId, amount, payment_method || 'system', 'system', 'confirmed']
-      );
-      
-      // Update member membership
+      await conn.query("UPDATE members SET balance = balance - ? WHERE id = ?", [amount, member_id]);
+
+      // 2. Calculate time
+      const minutes = duration_minutes || 2880; // 2 days default
       const startDate = new Date();
-      const expirationDate = new Date(startDate.getTime() + finalDuration * 60 * 1000);
+      const expirationDate = new Date(startDate.getTime() + minutes * 60000);
       
-      // Get plan name from static data
-      let planName = 'Unknown Plan';
-      if (plan_id === 1) planName = 'TRIAL AWAKENING';
-      else if (plan_id === 2) planName = 'STANDARD MONTHLY';
-      else if (plan_id === 3) planName = 'ELITE ANNUAL';
-      
+      let planName = plan_id === 1 ? 'TRIAL' : 'STANDARD';
+
+      // 3. Update Member Status
       await conn.query(
-        "UPDATE members SET current_status = 'active', start_date = ?, expiration_date = ?, current_plan = ? WHERE id = ?",
-        [startDate, expirationDate, planName, actualMemberId]
+        "UPDATE members SET current_status = 'active', display_status = 'ACTIVE', start_date = ?, expiration_date = ?, current_plan = ? WHERE id = ?",
+        [startDate, expirationDate, planName, member_id]
       );
-      
+
       await conn.commit();
-      
-      const results = [{
-        action: 'activated',
-        member_name: 'Member',
-        plan_name: 'Plan',
-        start_date: startDate,
-        expiration_date: expirationDate,
-        remaining_minutes: finalDuration
-      }];
-      
+      res.json({ success: true, message: "Activated!", balance: currentBalance - amount });
+
     } catch (err) {
       await conn.rollback();
-      throw err;
+      res.status(400).json({ success: false, message: err.message });
     } finally {
       conn.release();
     }
-    
-    if (results.length === 0) {
-      return res.status(400).json({ success: false, message: "Membership activation failed" });
-    }
-
-    const result = results[0];
-    
-    return res.json({
-      success: true,
-      data: {
-        action: result.action,
-        member_name: result.member_name,
-        plan_name: result.plan_name,
-        start_date: result.start_date,
-        expiration_date: result.expiration_date,
-        remaining_minutes: result.remaining_minutes
-      },
-      message: "Membership activated successfully"
-    });
-  } catch (err) {
-    console.error('Membership activation error:', err);
-    return next(err);
-  }
+  } catch (err) { next(err); }
 });
 
 /** GET /api/membership-timer/:id — Get countdown timer */
