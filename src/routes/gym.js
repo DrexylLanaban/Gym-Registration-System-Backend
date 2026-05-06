@@ -163,13 +163,47 @@ gymApiRouter.post("/memberships/activate", async (req, res, next) => {
       return res.status(400).json({ success: false, message: "member_id, plan_id, and amount are required" });
     }
 
-    // Use stored procedure with custom duration support
+    // Use direct SQL queries instead of stored procedure
     const finalDuration = duration_minutes || 43200;
     console.log('Final duration:', finalDuration, 'Type:', typeof finalDuration);
     
-    const [results] = await db.query("CALL ActivateMembership(?, ?, ?, ?, ?, ?)", [
-      actualMemberId, plan_id, amount, payment_method || 'system', 'system', finalDuration
-    ]);
+    // Start transaction
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
+      
+      // Create payment record
+      const [paymentResult] = await conn.query(
+        "INSERT INTO payments (member_id, plan_id, amount, payment_method, processed_by, status) VALUES (?, ?, ?, ?, ?, ?)",
+        [actualMemberId, plan_id, amount, payment_method || 'system', 'system', 'confirmed']
+      );
+      
+      // Update member membership
+      const startDate = new Date();
+      const expirationDate = new Date(startDate.getTime() + finalDuration * 60 * 1000);
+      
+      await conn.query(
+        "UPDATE members SET membership_status = 'active', start_date = ?, expiration_date = ?, current_plan = (SELECT plan_name FROM membership_plans WHERE id = ?) WHERE id = ?",
+        [startDate, expirationDate, plan_id, actualMemberId]
+      );
+      
+      await conn.commit();
+      
+      const results = [{
+        action: 'activated',
+        member_name: 'Member',
+        plan_name: 'Plan',
+        start_date: startDate,
+        expiration_date: expirationDate,
+        remaining_minutes: finalDuration
+      }];
+      
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
     
     if (results.length === 0) {
       return res.status(400).json({ success: false, message: "Membership activation failed" });
