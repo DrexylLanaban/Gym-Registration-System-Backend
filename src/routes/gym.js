@@ -145,15 +145,25 @@ gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
 /** POST /api/memberships/activate — Activate membership with custom duration */
 gymApiRouter.post("/memberships/activate", async (req, res, next) => {
   try {
-    const { member_id, plan_id, amount, payment_method, duration_minutes } = req.body || {};
+    const { member_id, user_id, plan_id, amount, payment_method, duration_minutes } = req.body || {};
     
-    if (!member_id || !plan_id || !amount) {
+    // Accept either member_id or user_id
+    let actualMemberId = member_id;
+    if (!actualMemberId && user_id) {
+      // Look up member_id from user_id
+      const [userRows] = await db.query("SELECT member_id FROM users WHERE id = ?", [user_id]);
+      if (userRows.length > 0 && userRows[0].member_id) {
+        actualMemberId = userRows[0].member_id;
+      }
+    }
+    
+    if (!actualMemberId || !plan_id || !amount) {
       return res.status(400).json({ success: false, message: "member_id, plan_id, and amount are required" });
     }
 
     // Use stored procedure with custom duration support
     const [results] = await db.query("CALL ActivateMembership(?, ?, ?, ?, ?, ?)", [
-      member_id, plan_id, amount, payment_method, 'system', duration_minutes
+      actualMemberId, plan_id, amount, payment_method || 'system', 'system', duration_minutes || 43200
     ]);
     
     if (results.length === 0) {
