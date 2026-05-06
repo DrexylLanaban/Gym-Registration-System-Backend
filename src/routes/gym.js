@@ -544,4 +544,148 @@ gymApiRouter.get("/admin/notifications", async (req, res) => {
   }
 });
 
-module.exports = { gymApiRouter };
+/** GET /api/schedules — Get workout schedules for member */
+gymApiRouter.get("/schedules", async (req, res, next) => {
+  try {
+    const memberId = req.query.member_id;
+    let query = "SELECT ws.*, t.full_name as trainer_name, t.specialization FROM workout_schedules ws LEFT JOIN trainers t ON ws.trainer_id = t.id";
+    let params = [];
+    
+    if (memberId) {
+      query += " WHERE ws.member_id = ? ORDER BY ws.created_at DESC";
+      params = [memberId];
+    } else {
+      query += " ORDER BY ws.created_at DESC";
+    }
+    
+    const [results] = await db.query(query, params);
+    
+    return res.json({
+      success: true,
+      data: results,
+      message: "Workout schedules retrieved successfully"
+    });
+  } catch (err) {
+    console.error('Schedules error:', err);
+    return next(err);
+  }
+});
+
+/** POST /api/add_schedule — Create workout schedule */
+gymApiRouter.post("/add_schedule", async (req, res, next) => {
+  try {
+    const { member_id, trainer_id, day_of_week, exercise_name, sets, reps, weight } = req.body;
+    
+    if (!member_id || !exercise_name || !day_of_week) {
+      return res.status(400).json({ success: false, message: "member_id, exercise_name, and day_of_week are required" });
+    }
+    
+    const [result] = await db.query(
+      "INSERT INTO workout_schedules (member_id, trainer_id, day_of_week, exercise_name, sets, reps, weight) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [member_id, trainer_id, day_of_week, exercise_name, sets || 0, reps || 0, weight || '']
+    );
+    
+    return res.json({
+      success: true,
+      data: { id: result.insertId },
+      message: "Workout schedule created successfully"
+    });
+  } catch (err) {
+    console.error('Add schedule error:', err);
+    return next(err);
+  }
+});
+
+/** POST /api/attendance — Mark attendance */
+gymApiRouter.post("/attendance", async (req, res, next) => {
+  try {
+    const { member_id } = req.body;
+    
+    if (!member_id) {
+      return res.status(400).json({ success: false, message: "member_id is required" });
+    }
+    
+    // Check if attendance already marked today
+    const [existing] = await db.query(
+      "SELECT id FROM attendance WHERE member_id = ? AND DATE(date) = CURDATE()",
+      [member_id]
+    );
+    
+    if (existing.length > 0) {
+      return res.status(400).json({ success: false, message: "Attendance already marked today" });
+    }
+    
+    // Mark attendance
+    const [result] = await db.query(
+      "INSERT INTO attendance (member_id, date, status) VALUES (?, CURDATE(), 'present')",
+      [member_id]
+    );
+    
+    return res.json({
+      success: true,
+      data: { id: result.insertId, date: new Date().toISOString().split('T')[0] },
+      message: "Attendance marked successfully"
+    });
+  } catch (err) {
+    console.error('Attendance error:', err);
+    return next(err);
+  }
+});
+
+/** GET /api/attendance/:member_id — Get attendance history */
+gymApiRouter.get("/attendance/:member_id", async (req, res, next) => {
+  try {
+    const memberId = req.params.member_id;
+    
+    const [results] = await db.query(
+      "SELECT * FROM attendance WHERE member_id = ? ORDER BY date DESC LIMIT 30",
+      [memberId]
+    );
+    
+    return res.json({
+      success: true,
+      data: results,
+      message: "Attendance history retrieved successfully"
+    });
+  } catch (err) {
+    console.error('Attendance history error:', err);
+    return next(err);
+  }
+});
+
+/** GET /api/trainers — Get active trainers with auto-reseed */
+gymApiRouter.get("/trainers", async (req, res, next) => {
+  try {
+    const [trainers] = await db.query("SELECT * FROM trainers WHERE status = 'active' ORDER BY full_name");
+    
+    // Auto-reseed default trainers if none exist
+    if (trainers.length === 0) {
+      console.log('No trainers found, reseeding default trainers...');
+      
+      await db.query(
+        "INSERT INTO trainers (full_name, specialization, status) VALUES (?, ?, ?), (?, ?, ?)",
+        ['Kent Dominic', 'Strength & Conditioning', 'active', 'Ryque Valen', 'Cardio & HIIT', 'active']
+      );
+      
+      // Fetch again after reseeding
+      const [newTrainers] = await db.query("SELECT * FROM trainers WHERE status = 'active' ORDER BY full_name");
+      
+      return res.json({
+        success: true,
+        data: newTrainers,
+        message: "Trainers retrieved successfully (default trainers reseeded)"
+      });
+    }
+    
+    return res.json({
+      success: true,
+      data: trainers,
+      message: "Trainers retrieved successfully"
+    });
+  } catch (err) {
+    console.error('Trainers error:', err);
+    return next(err);
+  }
+});
+
+module.exports = gymApiRouter;
