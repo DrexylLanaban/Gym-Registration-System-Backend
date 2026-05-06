@@ -108,8 +108,14 @@ gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Valid member ID required" });
     }
 
-    // Use stored procedure for real-time status
-    const [results] = await db.query("CALL GetRealTimeMembershipStatus(?)", [memberId]);
+    // Use direct SQL query for real-time status
+    const [results] = await db.query(
+      `SELECT m.*, mp.plan_name, mp.price as plan_price 
+       FROM members m 
+       LEFT JOIN membership_plans mp ON m.current_plan = mp.plan_name 
+       WHERE m.id = ?`,
+      [memberId]
+    );
     
     if (results.length === 0) {
       return res.status(404).json({ success: false, message: "Member not found" });
@@ -313,10 +319,43 @@ gymApiRouter.post("/test-membership", async (req, res, next) => {
 
     const plan = planRows[0];
 
-    // Activate 2-minute membership using stored procedure
-    const [results] = await db.query("CALL ActivateMembership(?, ?, ?, ?, 'system', 2)", [
-      member_id, plan.id, plan.price, 'system'
-    ]);
+    // Activate 2-minute membership using direct SQL
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
+      
+      // Create payment record
+      await conn.query(
+        "INSERT INTO payments (member_id, plan_id, amount, payment_method, processed_by, status) VALUES (?, ?, ?, ?, ?, ?)",
+        [member_id, plan.id, plan.price, 'system', 'system', 'confirmed']
+      );
+      
+      // Update member membership (2 minutes = 120 seconds)
+      const startDate = new Date();
+      const expirationDate = new Date(startDate.getTime() + 2 * 60 * 1000);
+      
+      await conn.query(
+        "UPDATE members SET membership_status = 'active', start_date = ?, expiration_date = ?, current_plan = ? WHERE id = ?",
+        [startDate, expirationDate, plan.plan_name, member_id]
+      );
+      
+      await conn.commit();
+      
+      const results = [{
+        action: 'activated',
+        member_name: 'Test Member',
+        plan_name: plan.plan_name,
+        start_date: startDate,
+        expiration_date: expirationDate,
+        remaining_minutes: 2
+      }];
+      
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
     
     if (results.length === 0) {
       return res.status(400).json({ success: false, message: "Test membership activation failed" });
@@ -347,12 +386,15 @@ gymApiRouter.post("/test-membership", async (req, res, next) => {
 /** POST /api/process-expirations — Process expired memberships manually */
 gymApiRouter.post("/process-expirations", async (req, res, next) => {
   try {
-    const [results] = await db.query("CALL ProcessExpiredMemberships()");
+    // Update expired memberships
+    const [result] = await db.query(
+      "UPDATE members SET membership_status = 'expired' WHERE expiration_date < NOW() AND membership_status = 'active'"
+    );
     
     return res.json({
       success: true,
       data: {
-        processed_count: results[0]?.expired_count || 0,
+        processed_count: result.affectedRows || 0,
         message: "Expired memberships processed successfully"
       },
       message: "Expiration processing completed"
