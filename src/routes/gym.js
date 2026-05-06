@@ -168,9 +168,15 @@ gymApiRouter.post("/memberships/activate", async (req, res, next) => {
     let actualMemberId = member_id;
     if (!actualMemberId && user_id) {
       // Look up member_id from user_id
+      console.log('Looking up member_id for user_id:', user_id);
       const [userRows] = await db.query("SELECT member_id FROM users WHERE id = ?", [user_id]);
+      console.log('User rows found:', userRows.length);
       if (userRows.length > 0 && userRows[0].member_id) {
         actualMemberId = userRows[0].member_id;
+        console.log('Found member_id:', actualMemberId);
+      } else {
+        console.log('No member_id found for user_id:', user_id);
+        return res.status(400).json({ success: false, message: "User not linked to a member account" });
       }
     }
     
