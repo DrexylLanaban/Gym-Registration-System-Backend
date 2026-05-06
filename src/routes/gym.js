@@ -2487,11 +2487,8 @@ gymApiRouter.get("/admin/notifications", async (req, res) => {
       count: notifications.length
     });
   } catch (err) {
-    console.error('Get admin notifications error:', err);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to retrieve admin notifications"
-    });
+    console.error('Admin notifications error:', err);
+    return res.status(500).json({ success: false, message: "Failed to fetch notifications" });
   }
 });
 
