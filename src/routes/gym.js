@@ -113,6 +113,10 @@ gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
 
     const member = results[0];
     
+    // Ensure all numeric values are properly converted
+    member.wallet_balance = Number(member.wallet_balance) || 0;
+    member.remaining_seconds = Number(member.remaining_seconds) || 0;
+    
     // If remaining_seconds is <= 0, backend should automatically return status: 'expired'
     if (member.remaining_seconds <= 0) {
       member.status = 'expired';
