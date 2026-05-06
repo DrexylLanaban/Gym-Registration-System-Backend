@@ -109,8 +109,10 @@ gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
     }
 
     // Use direct SQL query for real-time status with balance included
+    console.log('Fetching membership status for member_id:', memberId);
     const [results] = await db.query(
       `SELECT m.*, 
+              m.balance,
               CASE 
                 WHEN m.current_status = 'active' AND m.expiration_date > NOW() 
                 THEN TIMESTAMPDIFF(MINUTE, NOW(), m.expiration_date)
@@ -125,6 +127,7 @@ gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
        WHERE m.id = ?`,
       [memberId]
     );
+    console.log('Membership status results:', results[0]);
     
     if (results.length === 0) {
       return res.status(404).json({ success: false, message: "Member not found" });
@@ -148,7 +151,7 @@ gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
         remaining_seconds: member.remaining_seconds || 0,
         user_type: member.user_type,
         membership_status: member.membership_status,
-        balance: member.balance || 0.00
+        balance: member.balance != null ? Number(member.balance) : 5.00
       },
       message: "Membership status retrieved successfully"
     });
