@@ -153,7 +153,7 @@ gymApiRouter.post("/memberships/activate", async (req, res, next) => {
 
     // Use stored procedure with custom duration support
     const [results] = await db.query("CALL ActivateMembership(?, ?, ?, ?, ?, ?)", [
-      member_id, plan_id, amount, payment_method, duration_minutes
+      member_id, plan_id, amount, payment_method, 'system', duration_minutes
     ]);
     
     if (results.length === 0) {
@@ -474,6 +474,52 @@ gymApiRouter.get("/payments", async (req, res, next) => {
     });
   } catch (err) {
     console.error('Payments list error:', err);
+    return next(err);
+  }
+});
+
+/** GET /api/my-payments — Get current user's payments */
+gymApiRouter.get("/my-payments", async (req, res, next) => {
+  try {
+    const user_id = req.query.user_id;
+    if (!user_id) {
+      return res.status(400).json({ success: false, message: "user_id query parameter required" });
+    }
+
+    // Get member_id from user_id
+    const [userRows] = await db.query("SELECT member_id FROM users WHERE id = ?", [user_id]);
+    
+    if (userRows.length === 0) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    const memberId = userRows[0].member_id;
+
+    // Get payments for this member
+    const [results] = await db.query(`
+      SELECT * FROM payments 
+      WHERE member_id = ? 
+      ORDER BY id DESC
+    `, [memberId]);
+
+    return res.json({
+      success: true,
+      data: results.map(payment => ({
+        id: payment.id,
+        receiptNumber: payment.receipt_number || `RCP${payment.id}`,
+        memberName: payment.member_name || "Unknown Member",
+        memberId: payment.member_id,
+        amount: Number(payment.amount || 0),
+        paymentMethod: payment.payment_method || 'cash',
+        status: payment.status || 'paid',
+        paymentDate: payment.payment_date || payment.created_at,
+        formattedDate: new Date(payment.payment_date || payment.created_at).toLocaleDateString(),
+        notes: payment.notes || ''
+      })),
+      message: "My payments fetched successfully"
+    });
+  } catch (err) {
+    console.error('My payments error:', err);
     return next(err);
   }
 });
@@ -807,20 +853,26 @@ gymApiRouter.get("/trainer-bookings/:id", async (req, res, next) => {
   }
 });
 
-/** GET /api/members — MemberListActivity */
+/** GET /api/members — MemberListActivity (OPTIMIZED) */
 gymApiRouter.get("/members", async (req, res, next) => {
   try {
     const search = req.query.search != null ? String(req.query.search).trim() : "";
     const status = req.query.status != null ? String(req.query.status).trim() : "";
     const page = Number(req.query.page) || 1;
-    const limit = Number(req.query.limit) || 100;
+    const limit = Math.min(Number(req.query.limit) || 100, 100); // Limit max to 100
     const offset = (page - 1) * limit;
 
-    // Enhanced query to include user role information
-    let sql = "SELECT m.*, u.profile_photo, u.email as user_email, u.role FROM members m LEFT JOIN users u ON u.member_id = m.id";
+    // Use optimized query with indexes
+    let sql = `
+      SELECT m.id, m.full_name, m.phone, m.email, m.status, m.membership_end_date as membership_end, 
+             m.created_at as registration_date, m.membership_plan, m.created_at, m.updated_at,
+             u.profile_photo, u.email as user_email, u.role
+      FROM members m 
+      LEFT JOIN users u ON u.member_id = m.id
+    `;
     const params = [];
 
-    // Build WHERE clause
+    // Build WHERE clause using indexed columns
     const whereConditions = [];
     
     if (search) {
@@ -829,16 +881,16 @@ gymApiRouter.get("/members", async (req, res, next) => {
       params.push(q, q, q, q);
     }
 
-    // Apply status filter with proper logic
+    // Apply status filter with proper MySQL status handling
     if (status && status !== 'all' && status !== '') {
       if (status === 'active') {
-        whereConditions.push("(u.role = 'admin' OR (m.status = 'ACTIVE' AND m.membership_end > NOW()))");
+        whereConditions.push("((m.status = 'active' OR m.status = 'ACTIVE') AND (m.membership_end_date IS NULL OR m.membership_end_date > CURDATE()))");
       } else if (status === 'inactive') {
-        // Exclude admins from inactive filter
-        whereConditions.push("(u.role != 'admin' AND (m.status = 'NO MONTHLY PLAN' OR m.status = 'INACTIVE'))");
+        whereConditions.push("(m.status = 'inactive' OR m.status = 'INACTIVE' OR m.status = 'NO MONTHLY PLAN')");
       } else if (status === 'expired') {
-        // Exclude admins from expired filter
-        whereConditions.push("(u.role != 'admin' AND m.status = 'EXPIRED')");
+        whereConditions.push("(m.status = 'expired' OR m.status = 'EXPIRED' OR (m.membership_end_date IS NOT NULL AND m.membership_end_date < CURDATE()))");
+      } else if (status === 'pending') {
+        whereConditions.push("(m.status = 'pending' OR m.status = 'PENDING')");
       }
     }
 
@@ -852,48 +904,63 @@ gymApiRouter.get("/members", async (req, res, next) => {
 
     const [results] = await db.query(sql, params);
 
-    // Count query with same filters
+    // Optimized count query - count only what we need
     let countSql = "SELECT COUNT(*) as total FROM members m LEFT JOIN users u ON u.member_id = m.id";
     const countParams = [];
     
     if (whereConditions.length > 0) {
       countSql += " WHERE " + whereConditions.join(" AND ");
-      // Copy relevant params for count query
+      // Copy relevant params for count query (without limit/offset)
       if (search) {
         const q = `%${search}%`;
         countParams.push(q, q, q, q);
       }
     }
-    
-    countParams.push(limit, offset);
 
     const [countResult] = await db.query(countSql, countParams);
     const total = countResult[0].total;
 
+    // Optimize data transformation - clean and consistent member data
+    const optimizedResults = results.map(member => {
+      // Determine actual member status
+      let actualStatus = (member.status || "").toLowerCase();
+      
+      // Calculate remaining days for active members
+      let remainingDays = 0;
+      if (member.membership_end) {
+        const today = new Date();
+        const endDate = new Date(member.membership_end);
+        remainingDays = Math.ceil((endDate - today) / (1000 * 60 * 60 * 24));
+        remainingDays = Math.max(0, remainingDays);
+      }
+      
+      // Normalize status for display
+      let displayStatus = actualStatus;
+      if (actualStatus === 'active' && remainingDays <= 0) {
+        displayStatus = 'expired';
+      }
+      
+      return {
+        id: member.id,
+        full_name: member.full_name || "",
+        phone: member.phone || "",
+        email: member.email || member.user_email || "",
+        status: displayStatus.toUpperCase(),
+        membership_end: member.membership_end,
+        registration_date: member.registration_date,
+        profile_photo: member.profile_photo || "",
+        current_plan: member.membership_plan || "NO MONTHLY PLAN",
+        remaining_days: remainingDays,
+        role: member.role || "member",
+        is_admin: (member.role && member.role.toLowerCase() === 'admin'),
+        created_at: member.created_at,
+        updated_at: member.updated_at
+      };
+    });
+
     return res.json({
       success: true,
-      data: results.map(member => {
-        // Check if this is an admin user (admin@gym.com or role = 'admin')
-        const isAdmin = (member.user_email && member.user_email.toLowerCase() === 'admin@gym.com') || 
-                       (member.role && member.role.toLowerCase() === 'admin');
-        
-        return {
-          id: member.id,
-          full_name: member.full_name || "",
-          phone: member.phone || "",
-          email: member.email || member.user_email || "",
-          status: isAdmin ? "PERMANENT" : (member.status || "NO MONTHLY PLAN"),
-          membership_end: member.membership_end,
-          registration_date: member.registration_date,
-          profile_photo: member.profile_photo || "",
-          current_plan: isAdmin ? "ADMIN" : (member.membership_plan || "NO MONTHLY PLAN"),
-          remaining_days: isAdmin ? 999999 : 0,
-          role: isAdmin ? "admin" : "member",
-          is_admin: isAdmin,
-          created_at: member.created_at,
-          updated_at: member.updated_at
-        };
-      }),
+      data: optimizedResults,
       pagination: {
         current_page: page,
         total_pages: Math.ceil(total / limit),
@@ -916,17 +983,17 @@ gymApiRouter.get("/get_member", async (req, res, next) => {
       return res.status(400).json({ success: false, message: "id query parameter required" });
     }
 
-    // Simplified query that works with current database
+    // Enhanced query with real membership data
     const [rows] = await db.query(`
       SELECT 
         m.*,
         u.role,
         u.profile_photo,
-        'inactive' as membership_status,
-        'No Plan' as current_plan,
-        NULL as expiration_date
+        mp.name as plan_name,
+        mp.duration_months
       FROM members m
       LEFT JOIN users u ON u.member_id = m.id
+      LEFT JOIN membership_plans mp ON mp.id = m.membership_plan_id
       WHERE m.id = ?
     `, [id]);
 
@@ -936,12 +1003,54 @@ gymApiRouter.get("/get_member", async (req, res, next) => {
 
     const member = rows[0];
     
-    // Don't return membership info for admin users
+    // Calculate actual member status
+    let membershipStatus = 'pending';
+    let currentPlan = 'No Plan';
+    let expirationDate = member.membership_end;
+    
+    // New members (created recently without membership) are pending
+    const createdDate = new Date(member.created_at || member.registration_date);
+    const today = new Date();
+    const daysSinceCreation = Math.floor((today - createdDate) / (1000 * 60 * 60 * 24));
+    
     if (member.role === 'admin') {
-      member.membership_status = null;
-      member.current_plan = null;
-      member.expiration_date = null;
+      membershipStatus = null;
+      currentPlan = null;
+      expirationDate = null;
+    } else if (member.membership_end) {
+      // Member has membership end date
+      const endDate = new Date(member.membership_end);
+      const remainingDays = Math.ceil((endDate - today) / (1000 * 60 * 60 * 24));
+      
+      if (remainingDays > 0) {
+        membershipStatus = 'active';
+        currentPlan = member.plan_name || member.membership_plan || 'Active Plan';
+      } else {
+        membershipStatus = 'expired';
+        currentPlan = member.plan_name || member.membership_plan || 'Expired Plan';
+      }
+    } else if (member.status) {
+      // Use database status if it exists
+      const dbStatus = (member.status || "").toLowerCase();
+      if (dbStatus === 'active' || dbStatus === 'inactive' || dbStatus === 'expired' || dbStatus === 'pending') {
+        membershipStatus = dbStatus;
+        currentPlan = member.plan_name || member.membership_plan || 'No Plan';
+      }
+    } else if (daysSinceCreation <= 7) {
+      // New members (less than 7 days) are pending by default
+      membershipStatus = 'pending';
+      currentPlan = 'No Plan';
+    } else {
+      // Members older than 7 days without membership are inactive
+      membershipStatus = 'inactive';
+      currentPlan = 'No Plan';
     }
+    
+    // Add calculated fields to member object
+    member.membership_status = membershipStatus ? membershipStatus.toUpperCase() : null;
+    member.current_plan = currentPlan;
+    member.expiration_date = expirationDate;
+    member.remaining_days = expirationDate ? Math.ceil((new Date(expirationDate) - today) / (1000 * 60 * 60 * 24)) : 0;
 
     return res.json({ 
       success: true, 
@@ -957,13 +1066,117 @@ gymApiRouter.get("/get_member", async (req, res, next) => {
 /** POST /api/members — AddEditMemberActivity */
 gymApiRouter.post("/members", async (req, res, next) => {
   try {
-    const { full_name, phone, email } = req.body || {};
+    const { full_name, phone, email, membership_plan_id } = req.body || {};
+    
+    // New members default to 'pending' status
     const [result] = await db.query(
-      "INSERT INTO members (full_name, phone, email) VALUES (?, ?, ?)",
+      `INSERT INTO members (full_name, phone, email, status, registration_date, created_at) 
+       VALUES (?, ?, ?, 'pending', CURDATE(), NOW())`,
       [full_name, phone, email]
     );
-    return res.json({ id: result.insertId, message: "Member added" });
+    
+    // If membership plan is provided, update the member
+    if (membership_plan_id) {
+      // Get membership plan details
+      const [planRows] = await db.query(
+        "SELECT duration_months FROM membership_plans WHERE id = ? AND is_active = 1",
+        [membership_plan_id]
+      );
+      
+      if (planRows.length > 0) {
+        const plan = planRows[0];
+        const membershipEnd = new Date();
+        membershipEnd.setMonth(membershipEnd.getMonth() + plan.duration_months);
+        
+        await db.query(
+          `UPDATE members 
+           SET membership_plan_id = ?, membership_end = ?, status = 'active'
+           WHERE id = ?`,
+          [membership_plan_id, membershipEnd.toISOString().split('T')[0], result.insertId]
+        );
+      }
+    }
+    
+    return res.json({ 
+      id: result.insertId, 
+      message: "Member added successfully",
+      status: membership_plan_id ? "active" : "pending"
+    });
   } catch (err) {
+    console.error('Add member error:', err);
+    return next(err);
+  }
+});
+
+/** PUT /api/members/:id — Update member details */
+gymApiRouter.put("/members/:id", async (req, res, next) => {
+  try {
+    const memberId = Number(req.params.id);
+    const { full_name, phone, email, membership_plan_id, status } = req.body || {};
+    
+    if (!Number.isFinite(memberId)) {
+      return res.status(400).json({ success: false, message: "Invalid member ID" });
+    }
+
+    // Build update query dynamically
+    const updateFields = [];
+    const updateValues = [];
+    
+    if (full_name) {
+      updateFields.push("full_name = ?");
+      updateValues.push(full_name);
+    }
+    if (phone) {
+      updateFields.push("phone = ?");
+      updateValues.push(phone);
+    }
+    if (email) {
+      updateFields.push("email = ?");
+      updateValues.push(email);
+    }
+    
+    // Handle membership plan changes
+    if (membership_plan_id) {
+      // Get membership plan details
+      const [planRows] = await db.query(
+        "SELECT duration_months FROM membership_plans WHERE id = ? AND is_active = 1",
+        [membership_plan_id]
+      );
+      
+      if (planRows.length > 0) {
+        const plan = planRows[0];
+        const membershipEnd = new Date();
+        membershipEnd.setMonth(membershipEnd.getMonth() + plan.duration_months);
+        
+        updateFields.push("membership_plan_id = ?");
+        updateValues.push(membership_plan_id);
+        updateFields.push("membership_end = ?");
+        updateValues.push(membershipEnd.toISOString().split('T')[0]);
+        updateFields.push("status = ?");
+        updateValues.push('active');
+      }
+    } else if (status) {
+      // Manual status override
+      updateFields.push("status = ?");
+      updateValues.push(status);
+    }
+    
+    updateFields.push("updated_at = NOW()");
+    updateValues.push(memberId);
+    
+    if (updateFields.length > 1) { // More than just updated_at
+      await db.query(
+        `UPDATE members SET ${updateFields.join(', ')} WHERE id = ?`,
+        updateValues
+      );
+    }
+    
+    return res.json({ 
+      success: true, 
+      message: "Member updated successfully"
+    });
+  } catch (err) {
+    console.error('Update member error:', err);
     return next(err);
   }
 });
@@ -998,11 +1211,6 @@ gymApiRouter.get("/payments", async (req, res, next) => {
     sql += " ORDER BY payments.id";
     const [results] = await db.query(sql, params);
     return res.json(results);
-  } catch (err) {
-    return next(err);
-  }
-});
-
 /** GET /api/dashboard/stats — MainActivity (Retrofit may use api/dashboard_stats) */
 async function getDashboardStats(req, res, next) {
   try {
@@ -1040,7 +1248,56 @@ async function getDashboardStats(req, res, next) {
 }
 
 gymApiRouter.get("/dashboard/stats", getDashboardStats);
-gymApiRouter.get("/dashboard_stats", getDashboardStats);
+
+/** GET /api/dashboard_stats — Dashboard (OPTIMIZED) */
+gymApiRouter.get("/dashboard_stats", async (req, res, next) => {
+  try {
+    // Check cache first
+    const cacheKey = 'dashboard_stats';
+    const [cacheResult] = await db.query(
+      "SELECT cache_value, last_updated FROM dashboard_cache WHERE cache_key = ? AND last_updated > DATE_SUB(NOW(), INTERVAL 5 MINUTE)",
+      [cacheKey]
+    );
+
+    if (cacheResult.length > 0) {
+      return res.json({
+        success: true,
+        data: JSON.parse(cacheResult[0].cache_value),
+        cached: true
+      });
+    }
+
+    // Use optimized single query with subqueries instead of multiple queries
+    const [statsResult] = await db.query(`
+      SELECT 
+        (SELECT COUNT(*) FROM members) as totalMembers,
+        (SELECT COUNT(*) FROM members WHERE status = 'ACTIVE') as activeMembers,
+        (SELECT COUNT(*) FROM members WHERE status = 'INACTIVE') as inactiveMembers,
+        (SELECT COUNT(*) FROM members WHERE status = 'EXPIRED' OR (membership_end IS NOT NULL AND membership_end <= NOW())) as expiredMembers,
+        (SELECT COUNT(*) FROM trainers) as totalTrainers,
+        (SELECT COUNT(*) FROM trainers WHERE status = 'active') as activeTrainers,
+        (SELECT COALESCE(SUM(amount), 0) FROM payments WHERE MONTH(payment_date) = MONTH(CURRENT_DATE()) AND YEAR(payment_date) = YEAR(CURRENT_DATE())) as monthlyIncome,
+        (SELECT COUNT(*) FROM attendance WHERE DATE(check_in_date) = CURDATE()) as todayAttendance
+    `);
+
+    const stats = statsResult[0];
+
+    // Cache the results
+    await db.query(
+      "INSERT INTO dashboard_cache (cache_key, cache_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE cache_value = VALUES(cache_value), last_updated = NOW()",
+      [cacheKey, JSON.stringify(stats)]
+    );
+
+    return res.json({
+      success: true,
+      data: stats,
+      cached: false
+    });
+  } catch (err) {
+    console.error('Dashboard stats error:', err);
+    return next(err);
+  }
+});
 
 /** GET /api/performance-reports — Performance Reports */
 gymApiRouter.get("/performance-reports", async (req, res, next) => {
@@ -1371,6 +1628,860 @@ gymApiRouter.post("/update_profile_photo", upload.single("photo"), async (req, r
     });
   } catch (err) {
     return next(err);
+  }
+});
+
+// =====================================================
+// BOOKING SYSTEM RESTORATION - Complete Booking API
+// =====================================================
+
+/** POST /api/trainer-bookings - Create Trainer Booking */
+gymApiRouter.post("/trainer-bookings", async (req, res, next) => {
+  try {
+    const { trainer_id, member_name, session_type, booking_date, start_time, end_time, notes } = req.body;
+    
+    if (!trainer_id || !member_name || !booking_date || !start_time || !end_time) {
+      return res.status(400).json({ success: false, message: "Missing required booking fields" });
+    }
+
+    // Get member info
+    const [memberRows] = await db.query(
+      "SELECT id, full_name, email FROM members WHERE full_name = ? OR email = ? LIMIT 1",
+      [member_name, member_name]
+    );
+    
+    if (!memberRows.length) {
+      return res.status(404).json({ success: false, message: "Member not found" });
+    }
+    
+    const member = memberRows[0];
+    
+    // Get trainer info
+    const [trainerRows] = await db.query(
+      "SELECT full_name, specialization FROM trainers WHERE id = ? AND status = 'active'",
+      [trainer_id]
+    );
+    
+    if (!trainerRows.length) {
+      return res.status(404).json({ success: false, message: "Trainer not found or unavailable" });
+    }
+    
+    const trainer = trainerRows[0];
+    
+    // Calculate total amount based on session type
+    let totalAmount = 500.00; // Default price
+    if (session_type === 'group') {
+      totalAmount = 300.00;
+    } else if (session_type === 'strength') {
+      totalAmount = 400.00;
+    } else if (session_type === 'cardio') {
+      totalAmount = 250.00;
+    }
+    
+    // Create booking
+    const [bookingResult] = await db.query(
+      `INSERT INTO bookings (member_id, trainer_id, booking_date, start_time, end_time, status, total_amount, payment_status, notes)
+       VALUES (?, ?, ?, ?, ?, 'booked', ?, 'pending', ?)`,
+      [member.id, trainer_id, booking_date, start_time, end_time, totalAmount, notes || '']
+    );
+    
+    const bookingId = bookingResult.insertId;
+    
+    // Generate receipt number
+    const receiptNumber = `TRB${Date.now()}${bookingId}`;
+    
+    // Create receipt
+    const receiptData = {
+      member_name: member.full_name,
+      trainer_name: trainer.full_name,
+      session_type: session_type || 'personal',
+      booking_date: booking_date,
+      start_time: start_time,
+      end_time: end_time,
+      amount: totalAmount,
+      status: 'booked'
+    };
+    
+    await db.query(
+      `INSERT INTO receipts (receipt_number, type, member_id, trainer_id, booking_id, total_amount, receipt_data)
+       VALUES (?, 'booking', ?, ?, ?, ?, ?)`,
+      [receiptNumber, member.id, trainer_id, bookingId, totalAmount, JSON.stringify(receiptData)]
+    );
+    
+    return res.json({
+      success: true,
+      data: {
+        booking_id: bookingId,
+        receipt_number: receiptNumber,
+        member_name: member.full_name,
+        trainer_name: trainer.full_name,
+        session_type: session_type || 'personal',
+        booking_date: booking_date,
+        start_time: start_time,
+        end_time: end_time,
+        total_amount: totalAmount,
+        status: 'booked'
+      },
+      message: "Booking created successfully"
+    });
+    
+  } catch (err) {
+    console.error('Create booking error:', err);
+    return res.status(500).json({ success: false, message: "Failed to create booking" });
+  }
+});
+
+/** GET /api/trainer-bookings - Get All Bookings (Admin) */
+gymApiRouter.get("/trainer-bookings", async (req, res, next) => {
+  try {
+    const [bookings] = await db.query(
+      `SELECT b.*, m.full_name as member_name, t.full_name as trainer_name, t.specialization
+       FROM bookings b
+       LEFT JOIN members m ON b.member_id = m.id
+       LEFT JOIN trainers t ON b.trainer_id = t.id
+       ORDER BY b.created_at DESC`
+    );
+    
+    return res.json({
+      success: true,
+      data: bookings,
+      message: "Bookings retrieved successfully"
+    });
+    
+  } catch (err) {
+    console.error('Get bookings error:', err);
+    return res.status(500).json({ success: false, message: "Failed to retrieve bookings" });
+  }
+});
+
+/** GET /api/trainer-bookings/:id - Get Booking Details */
+gymApiRouter.get("/trainer-bookings/:id", async (req, res, next) => {
+  try {
+    const bookingId = req.params.id;
+    
+    const [bookings] = await db.query(
+      `SELECT b.*, m.full_name as member_name, m.email as member_email, m.phone as member_phone,
+              t.full_name as trainer_name, t.specialization, t.email as trainer_email
+       FROM bookings b
+       LEFT JOIN members m ON b.member_id = m.id
+       LEFT JOIN trainers t ON b.trainer_id = t.id
+       WHERE b.id = ?`,
+      [bookingId]
+    );
+    
+    if (!bookings.length) {
+      return res.status(404).json({ success: false, message: "Booking not found" });
+    }
+    
+    const booking = bookings[0];
+    
+    // Get receipt if exists
+    const [receipts] = await db.query(
+      "SELECT * FROM receipts WHERE booking_id = ? ORDER BY generated_at DESC LIMIT 1",
+      [bookingId]
+    );
+    
+    booking.receipt = receipts[0] || null;
+    
+    return res.json({
+      success: true,
+      data: booking,
+      message: "Booking details retrieved successfully"
+    });
+    
+  } catch (err) {
+    console.error('Get booking details error:', err);
+    return res.status(500).json({ success: false, message: "Failed to retrieve booking details" });
+  }
+});
+
+/** POST /api/trainer-bookings/:id/payment - Process Booking Payment */
+gymApiRouter.post("/trainer-bookings/:id/payment", async (req, res, next) => {
+  try {
+    const bookingId = req.params.id;
+    const { payment_method, amount } = req.body;
+    
+    if (!payment_method || !amount) {
+      return res.status(400).json({ success: false, message: "Payment method and amount required" });
+    }
+    
+    // Get booking details
+    const [bookings] = await db.query(
+      "SELECT * FROM bookings WHERE id = ?",
+      [bookingId]
+    );
+    
+    if (!bookings.length) {
+      return res.status(404).json({ success: false, message: "Booking not found" });
+    }
+    
+    const booking = bookings[0];
+    
+    // Create payment record
+    const [paymentResult] = await db.query(
+      `INSERT INTO booking_payments (booking_id, amount, payment_method, payment_date, status)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP, 'paid')`,
+      [bookingId, amount, payment_method]
+    );
+    
+    const paymentId = paymentResult.insertId;
+    
+    // Update booking status
+    await db.query(
+      "UPDATE bookings SET payment_status = 'paid', status = 'confirmed' WHERE id = ?",
+      [bookingId]
+    );
+    
+    // Generate final receipt
+    const receiptNumber = `TRP${Date.now()}${paymentId}`;
+    const receiptData = {
+      booking_id: bookingId,
+      payment_id: paymentId,
+      payment_method: payment_method,
+      amount: amount,
+      payment_date: new Date().toISOString(),
+      status: 'paid'
+    };
+    
+    await db.query(
+      `INSERT INTO receipts (receipt_number, type, member_id, trainer_id, booking_id, payment_id, total_amount, receipt_data)
+       VALUES (?, 'payment', ?, ?, ?, ?, ?, ?)`,
+      [receiptNumber, booking.member_id, booking.trainer_id, bookingId, paymentId, amount, JSON.stringify(receiptData)]
+    );
+    
+    return res.json({
+      success: true,
+      data: {
+        payment_id: paymentId,
+        receipt_number: receiptNumber,
+        booking_status: 'confirmed',
+        payment_status: 'paid'
+      },
+      message: "Payment processed successfully"
+    });
+    
+  } catch (err) {
+    console.error('Process payment error:', err);
+    return res.status(500).json({ success: false, message: "Failed to process payment" });
+  }
+});
+
+/** GET /api/receipts/:receipt_number - Get Receipt by Number */
+gymApiRouter.get("/receipts/:receipt_number", async (req, res, next) => {
+  try {
+    const receiptNumber = req.params.receipt_number;
+    
+    const [receipts] = await db.query(
+      `SELECT r.*, m.full_name as member_name, t.full_name as trainer_name
+       FROM receipts r
+       LEFT JOIN members m ON r.member_id = m.id
+       LEFT JOIN trainers t ON r.trainer_id = t.id
+       WHERE r.receipt_number = ?`,
+      [receiptNumber]
+    );
+    
+    if (!receipts.length) {
+      return res.status(404).json({ success: false, message: "Receipt not found" });
+    }
+    
+    const receipt = receipts[0];
+    
+    // Parse receipt data
+    if (receipt.receipt_data) {
+      try {
+        receipt.receipt_data = JSON.parse(receipt.receipt_data);
+      } catch (e) {
+        receipt.receipt_data = {};
+      }
+    }
+    
+    return res.json({
+      success: true,
+      data: receipt,
+      message: "Receipt retrieved successfully"
+    });
+    
+  } catch (err) {
+    console.error('Get receipt error:', err);
+    return res.status(500).json({ success: false, message: "Failed to retrieve receipt" });
+  }
+});
+
+/** GET /api/trainer-sessions - Get Available Trainer Sessions */
+gymApiRouter.get("/trainer-sessions", async (req, res, next) => {
+  try {
+    const trainerId = req.query.trainer_id;
+    
+    let sql = `
+      SELECT ts.*, t.full_name as trainer_name, t.specialization
+      FROM trainer_sessions ts
+      LEFT JOIN trainers t ON ts.trainer_id = t.id
+      WHERE ts.is_active = 1
+    `;
+    const params = [];
+    
+    if (trainerId) {
+      sql += " AND ts.trainer_id = ?";
+      params.push(trainerId);
+    }
+    
+    sql += " ORDER BY ts.session_name";
+    
+    const [sessions] = await db.query(sql, params);
+    
+    return res.json({
+      success: true,
+      data: sessions,
+      message: "Trainer sessions retrieved successfully"
+    });
+    
+  } catch (err) {
+    console.error('Get trainer sessions error:', err);
+    return res.status(500).json({ success: false, message: "Failed to retrieve trainer sessions" });
+  }
+});
+
+/** POST /api/attendance - Record Attendance */
+gymApiRouter.post("/attendance", async (req, res, next) => {
+  try {
+    const { member_id, trainer_id, check_in_time, date, notes } = req.body;
+    
+    if (!member_id || !date) {
+      return res.status(400).json({ success: false, message: "Member ID and date are required" });
+    }
+    
+    // Check if attendance already exists for this member and date
+    const [existing] = await db.query(
+      "SELECT id FROM attendance WHERE member_id = ? AND date = ?",
+      [member_id, date]
+    );
+    
+    if (existing.length > 0) {
+      return res.status(400).json({ success: false, message: "Attendance already recorded for this date" });
+    }
+    
+    // Record attendance
+    const [result] = await db.query(
+      `INSERT INTO attendance (member_id, trainer_id, check_in_time, date, status, notes)
+       VALUES (?, ?, ?, ?, 'present', ?)`,
+      [member_id, trainer_id || null, check_in_time || new Date(), date, notes || '']
+    );
+    
+    return res.json({
+      success: true,
+      data: {
+        attendance_id: result.insertId,
+        member_id: member_id,
+        date: date,
+        status: 'present'
+      },
+      message: "Attendance recorded successfully"
+    });
+    
+  } catch (err) {
+    console.error('Record attendance error:', err);
+    return res.status(500).json({ success: false, message: "Failed to record attendance" });
+  }
+});
+
+/** GET /api/attendance - Get Attendance Records */
+gymApiRouter.get("/attendance", async (req, res, next) => {
+  try {
+    const { date, member_id, trainer_id } = req.query;
+    
+    let sql = `
+      SELECT a.*, m.full_name as member_name, t.full_name as trainer_name
+      FROM attendance a
+      LEFT JOIN members m ON a.member_id = m.id
+      LEFT JOIN trainers t ON a.trainer_id = t.id
+      WHERE 1=1
+    `;
+    const params = [];
+    
+    if (date) {
+      sql += " AND a.date = ?";
+      params.push(date);
+    }
+    
+    if (member_id) {
+      sql += " AND a.member_id = ?";
+      params.push(member_id);
+    }
+    
+    if (trainer_id) {
+      sql += " AND a.trainer_id = ?";
+      params.push(trainer_id);
+    }
+    
+    sql += " ORDER BY a.date DESC, a.check_in_time DESC";
+    
+    const [attendance] = await db.query(sql, params);
+    
+    return res.json({
+      success: true,
+      data: attendance,
+      message: "Attendance records retrieved successfully"
+    });
+    
+  } catch (err) {
+    console.error('Get attendance error:', err);
+    return res.status(500).json({ success: false, message: "Failed to retrieve attendance records" });
+  }
+});
+
+/** GET /api/membership-plans — Get all membership plans for dropdown */
+gymApiRouter.get("/membership-plans", async (req, res, next) => {
+  try {
+    const [plans] = await db.query(
+      `SELECT id, name, description, price, duration_months, features, is_active
+       FROM membership_plans 
+       WHERE is_active = 1 
+       ORDER BY price ASC`
+    );
+    
+    return res.json({
+      success: true,
+      data: plans,
+      message: "Membership plans retrieved successfully"
+    });
+  } catch (err) {
+    console.error('Get membership plans error:', err);
+    return res.status(500).json({ 
+      success: false, 
+      message: "Failed to retrieve membership plans" 
+    });
+  }
+});
+
+/** GET /api/payments — Get payment records for management */
+gymApiRouter.get("/payments", async (req, res, next) => {
+  try {
+    const { status, member_id, date_from, date_to, page = 1, limit = 50 } = req.query;
+    const offset = (page - 1) * limit;
+    
+    let sql = `
+      SELECT p.*, m.full_name as member_name, m.email as member_email,
+             t.full_name as trainer_name
+      FROM payments p
+      LEFT JOIN members m ON p.member_id = m.id
+      LEFT JOIN trainers t ON p.trainer_id = t.id
+      WHERE 1=1
+    `;
+    const params = [];
+    
+    if (status && status !== 'all') {
+      sql += " AND p.status = ?";
+      params.push(status);
+    }
+    
+    if (member_id) {
+      sql += " AND p.member_id = ?";
+      params.push(member_id);
+    }
+    
+    if (date_from) {
+      sql += " AND p.payment_date >= ?";
+      params.push(date_from);
+    }
+    
+    if (date_to) {
+      sql += " AND p.payment_date <= ?";
+      params.push(date_to);
+    }
+    
+    sql += " ORDER BY p.payment_date DESC LIMIT ? OFFSET ?";
+    params.push(Number(limit), offset);
+    
+    const [payments] = await db.query(sql, params);
+    
+    // Get total count for pagination
+    let countSql = "SELECT COUNT(*) as total FROM payments p WHERE 1=1";
+    const countParams = [];
+    
+    if (status && status !== 'all') {
+      countSql += " AND p.status = ?";
+      countParams.push(status);
+    }
+    
+    if (member_id) {
+      countSql += " AND p.member_id = ?";
+      countParams.push(member_id);
+    }
+    
+    if (date_from) {
+      countSql += " AND p.payment_date >= ?";
+      countParams.push(date_from);
+    }
+    
+    if (date_to) {
+      countSql += " AND p.payment_date <= ?";
+      countParams.push(date_to);
+    }
+    
+    const [countResult] = await db.query(countSql, countParams);
+    const total = countResult[0].total;
+    
+    return res.json({
+      success: true,
+      data: payments,
+      pagination: {
+        current_page: Number(page),
+        total_pages: Math.ceil(total / limit),
+        total_records: total,
+        limit: Number(limit)
+      },
+      message: "Payments retrieved successfully"
+    });
+  } catch (err) {
+    console.error('Get payments error:', err);
+    return res.status(500).json({ 
+      success: false, 
+      message: "Failed to retrieve payments" 
+    });
+  }
+});
+
+/** POST /api/payments — Create new payment record */
+gymApiRouter.post("/payments", async (req, res, next) => {
+  try {
+    const { member_id, amount, payment_method, payment_date, description, receipt_number } = req.body;
+    
+    if (!member_id || !amount || !payment_method) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Member ID, amount, and payment method are required" 
+      });
+    }
+    
+    // Generate receipt number if not provided
+    const receiptNum = receipt_number || `PAY${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    
+    const [result] = await db.query(
+      `INSERT INTO payments (member_id, amount, payment_method, payment_date, status, description, receipt_number)
+       VALUES (?, ?, ?, ?, 'paid', ?, ?)`,
+      [member_id, amount, payment_method, payment_date || new Date().toISOString().split('T')[0], description || '', receiptNum]
+    );
+    
+    // Update member status if this is a membership payment
+    if (description && description.toLowerCase().includes('membership')) {
+      const membershipEnd = new Date();
+      membershipEnd.setMonth(membershipEnd.getMonth() + 1); // Add 1 month
+      await db.query(
+        "UPDATE members SET status = 'active', membership_end = ? WHERE id = ?",
+        [membershipEnd.toISOString().split('T')[0], member_id]
+      );
+    }
+    
+    return res.json({
+      success: true,
+      data: {
+        payment_id: result.insertId,
+        receipt_number: receiptNum,
+        status: 'paid'
+      },
+      message: "Payment created successfully"
+    });
+  } catch (err) {
+    console.error('Create payment error:', err);
+    return res.status(500).json({ 
+      success: false, 
+      message: "Failed to create payment" 
+    });
+  }
+});
+
+// =====================================================
+// MEMBERSHIP SYSTEM API ENDPOINTS
+// =====================================================
+
+/** POST /api/membership/purchase - Purchase membership plan */
+gymApiRouter.post("/membership/purchase", async (req, res) => {
+  try {
+    const { user_id, member_id, plan_name, plan_id, amount, duration_days, payment_method } = req.body;
+    
+    if (!user_id || !member_id || !plan_name || !amount || !duration_days) {
+      return res.status(400).json({
+        success: false,
+        message: "user_id, member_id, plan_name, amount, and duration_days are required"
+      });
+    }
+
+    // Check for duplicate active membership
+    const [existing] = await db.query(
+      "SELECT membership_id FROM memberships WHERE user_id = ? AND membership_status = 'active' AND expiration_date > NOW()",
+      [user_id]
+    );
+    
+    if (existing.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: "You already have an active membership. Please wait for it to expire or cancel it first."
+      });
+    }
+
+    const now = new Date();
+    const expirationDate = new Date(now.getTime() + duration_days * 24 * 60 * 60 * 1000);
+    const receiptNum = `RCP${Date.now()}${Math.floor(Math.random() * 1000)}`;
+
+    // Insert payment
+    const [paymentResult] = await db.query(
+      `INSERT INTO payments (receipt_number, member_id, amount, payment_method, payment_date, status, description, processed_by)
+       VALUES (?, ?, ?, ?, NOW(), 'paid', ?, 'System')`,
+      [receiptNum, member_id, amount, payment_method || 'Wallet', `Membership: ${plan_name}`]
+    );
+
+    // Insert membership record
+    const [membershipResult] = await db.query(
+      `INSERT INTO memberships (user_id, member_id, membership_plan, amount_paid, start_date, expiration_date, remaining_seconds, membership_status)
+       VALUES (?, ?, ?, ?, NOW(), ?, ?, 'active')`,
+      [user_id, member_id, plan_name, amount, expirationDate, Math.floor(duration_days * 24 * 60 * 60)]
+    );
+
+    // Update member status
+    await db.query(
+      "UPDATE members SET status = 'active', membership_plan_id = ? WHERE id = ?",
+      [plan_id || null, member_id]
+    );
+
+    // Create notification for admin
+    await db.query(
+      `INSERT INTO notifications (admin_target, user_id, message, type, is_read)
+       VALUES ('all', ?, ?, 'payment', 0)`,
+      [user_id, `New membership purchase: ${plan_name} by user #${user_id} - Amount: ₱${amount}`]
+    );
+
+    return res.json({
+      success: true,
+      data: {
+        payment_id: paymentResult.insertId,
+        membership_id: membershipResult.insertId,
+        receipt_number: receiptNum,
+        plan_name: plan_name,
+        amount: amount,
+        start_date: now,
+        expiration_date: expirationDate,
+        status: 'active'
+      },
+      message: "Membership purchased successfully!"
+    });
+  } catch (err) {
+    console.error('Membership purchase error:', err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to process membership purchase: " + err.message
+    });
+  }
+});
+
+/** GET /api/membership/status/:user_id - Get real-time membership status */
+gymApiRouter.get("/membership/status/:user_id", async (req, res) => {
+  try {
+    const userId = req.params.user_id;
+    
+    // Update expired memberships first
+    await db.query(
+      `UPDATE memberships 
+       SET membership_status = 'expired', remaining_seconds = 0
+       WHERE expiration_date <= NOW() AND membership_status = 'active'`
+    );
+    
+    const [rows] = await db.query(
+      `SELECT 
+        m.membership_id,
+        m.user_id,
+        m.member_id,
+        m.membership_plan,
+        m.amount_paid,
+        m.start_date,
+        m.expiration_date,
+        CASE 
+          WHEN m.expiration_date > NOW() THEN TIMESTAMPDIFF(SECOND, NOW(), m.expiration_date)
+          ELSE 0
+        END as remaining_seconds,
+        CASE 
+          WHEN m.expiration_date > NOW() THEN 'active'
+          ELSE 'expired'
+        END as membership_status,
+        mem.full_name as member_name,
+        mem.member_code
+       FROM memberships m
+       LEFT JOIN members mem ON m.member_id = mem.id
+       WHERE m.user_id = ? AND m.membership_status != 'expired'
+       ORDER BY m.created_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+    
+    if (rows.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          has_membership: false,
+          membership_status: 'inactive',
+          message: 'No active membership found'
+        }
+      });
+    }
+    
+    const membership = rows[0];
+    membership.has_membership = true;
+    membership.remaining_seconds = Math.max(0, membership.remaining_seconds);
+    
+    return res.json({
+      success: true,
+      data: membership
+    });
+  } catch (err) {
+    console.error('Get membership status error:', err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to retrieve membership status"
+    });
+  }
+});
+
+/** GET /api/membership/timer/:user_id - Get countdown timer data */
+gymApiRouter.get("/membership/timer/:user_id", async (req, res) => {
+  try {
+    const userId = req.params.user_id;
+    
+    const [rows] = await db.query(
+      `SELECT 
+        TIMESTAMPDIFF(SECOND, NOW(), expiration_date) as remaining_seconds,
+        membership_status,
+        membership_plan
+       FROM memberships 
+       WHERE user_id = ? AND membership_status = 'active'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+    
+    if (rows.length === 0) {
+      return res.json({
+        success: true,
+        data: { active: false, remaining_seconds: 0 }
+      });
+    }
+    
+    const remaining = Math.max(0, rows[0].remaining_seconds);
+    
+    // Auto-expire if needed
+    if (remaining === 0 && rows[0].membership_status === 'active') {
+      await db.query(
+        "UPDATE memberships SET membership_status = 'expired' WHERE user_id = ? AND membership_status = 'active'",
+        [userId]
+      );
+    }
+    
+    return res.json({
+      success: true,
+      data: {
+        active: remaining > 0,
+        remaining_seconds: remaining,
+        membership_plan: rows[0].membership_plan,
+        membership_status: remaining > 0 ? 'active' : 'expired'
+      }
+    });
+  } catch (err) {
+    console.error('Timer error:', err);
+    return res.status(500).json({
+      success: false,
+      message: "Timer error"
+    });
+  }
+});
+
+/** GET /api/user/receipts/:user_id - Get user's receipt/payment history */
+gymApiRouter.get("/user/receipts/:user_id", async (req, res) => {
+  try {
+    const userId = req.params.user_id;
+    
+    // Get receipts from payments table joined with members
+    const [receipts] = await db.query(
+      `SELECT 
+        p.id,
+        p.receipt_number,
+        p.member_id,
+        mem.full_name as member_name,
+        p.amount,
+        p.payment_method,
+        p.payment_date,
+        p.status,
+        p.description as notes,
+        p.processed_by
+       FROM payments p
+       LEFT JOIN members mem ON p.member_id = mem.id
+       WHERE p.member_id IN (SELECT member_id FROM memberships WHERE user_id = ?)
+          OR p.member_id = ?
+       ORDER BY p.payment_date DESC`,
+      [userId, userId]
+    );
+    
+    return res.json({
+      success: true,
+      data: receipts,
+      count: receipts.length
+    });
+  } catch (err) {
+    console.error('Get receipts error:', err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to retrieve receipts"
+    });
+  }
+});
+
+/** GET /api/user/notifications/:user_id - Get user notifications */
+gymApiRouter.get("/user/notifications/:user_id", async (req, res) => {
+  try {
+    const userId = req.params.user_id;
+    
+    const [notifications] = await db.query(
+      `SELECT * FROM notifications 
+       WHERE (user_id = ? OR admin_target = 'all') 
+       ORDER BY created_at DESC
+       LIMIT 50`,
+      [userId]
+    );
+    
+    return res.json({
+      success: true,
+      data: notifications,
+      count: notifications.length
+    });
+  } catch (err) {
+    console.error('Get notifications error:', err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to retrieve notifications"
+    });
+  }
+});
+
+/** GET /api/admin/notifications - Get all admin notifications */
+gymApiRouter.get("/admin/notifications", async (req, res) => {
+  try {
+    const [notifications] = await db.query(
+      `SELECT n.*, u.name as user_name 
+       FROM notifications n
+       LEFT JOIN users u ON n.user_id = u.id
+       WHERE admin_target = 'all'
+       ORDER BY n.created_at DESC
+       LIMIT 50`
+    );
+    
+    return res.json({
+      success: true,
+      data: notifications,
+      count: notifications.length
+    });
+  } catch (err) {
+    console.error('Get admin notifications error:', err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to retrieve admin notifications"
+    });
   }
 });
 

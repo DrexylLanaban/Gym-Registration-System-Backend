@@ -4,7 +4,7 @@ require("dotenv").config();
 function parseHostAndPort(hostValue) {
   if (!hostValue) return { host: "localhost", portFromHost: undefined };
   const raw = String(hostValue).trim();
-  // Support "host:port" values (common copy/paste from cloud dashboards).
+  // "host:port" 
   if (!raw.startsWith("[") && raw.includes(":")) {
     const parts = raw.split(":");
     if (parts.length === 2 && parts[0] && parts[1]) {

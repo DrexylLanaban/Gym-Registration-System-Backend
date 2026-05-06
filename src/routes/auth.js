@@ -34,6 +34,25 @@ function userPayloadForApp(userRow, token) {
   const profilePhoto = profileFromUser || profileFromMember || "";
   const rawId = base.id;
   const idNum = rawId != null && rawId !== "" ? Number(rawId) : 0;
+  
+  // Determine role with proper admin detection
+  let userRole = "user"; // Default role
+  if (base.role) {
+    const roleStr = String(base.role).toLowerCase();
+    if (roleStr === "admin" || roleStr === "administrator") {
+      userRole = "admin";
+    } else if (roleStr === "staff" || roleStr === "trainer") {
+      userRole = "staff";
+    } else {
+      userRole = roleStr;
+    }
+  }
+  
+  // Special admin detection by email
+  if (email === "admin@gym.com" || email === "administrator@gym.com") {
+    userRole = "admin";
+  }
+  
   return {
     id: Number.isFinite(idNum) ? idNum : 0,
     memberId: (() => {
@@ -43,10 +62,21 @@ function userPayloadForApp(userRow, token) {
     })(),
     name: base.name != null ? String(base.name) : "",
     email,
-    role: base.role != null ? String(base.role) : "staff",
+    role: userRole,
     phone: base.phone != null ? String(base.phone) : "",
     profilePhoto,
     token,
+    isAdmin: userRole === "admin",
+    permissions: {
+      canManageMembers: userRole === "admin",
+      canManageTrainers: userRole === "admin",
+      canManagePayments: userRole === "admin",
+      canManageAttendance: userRole === "admin",
+      canViewReports: userRole === "admin",
+      canBookSessions: true, // All users can book sessions
+      canViewProfile: true, // All users can view profile
+      canManageBookings: userRole === "admin"
+    }
   };
 }
 
