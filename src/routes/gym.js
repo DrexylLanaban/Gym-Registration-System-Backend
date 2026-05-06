@@ -108,11 +108,11 @@ gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Valid member ID required" });
     }
 
-    // Use direct SQL query for real-time status without JOIN to non-existent table
+    // Use direct SQL query for real-time status without non-existent columns
     const [results] = await db.query(
       `SELECT m.*, 
               CASE 
-                WHEN m.membership_status = 'active' AND m.expiration_date > NOW() 
+                WHEN m.current_status = 'active' AND m.expiration_date > NOW() 
                 THEN TIMESTAMPDIFF(MINUTE, NOW(), m.expiration_date)
                 ELSE 0 
               END as remaining_minutes,
@@ -204,7 +204,7 @@ gymApiRouter.post("/memberships/activate", async (req, res, next) => {
       else if (plan_id === 3) planName = 'ELITE ANNUAL';
       
       await conn.query(
-        "UPDATE members SET membership_status = 'active', start_date = ?, expiration_date = ?, current_plan = ? WHERE id = ?",
+        "UPDATE members SET current_status = 'active', start_date = ?, expiration_date = ?, current_plan = ? WHERE id = ?",
         [startDate, expirationDate, planName, actualMemberId]
       );
       
@@ -259,7 +259,7 @@ gymApiRouter.get("/membership-timer/:id", async (req, res, next) => {
     }
 
     const [membership] = await db.query(
-      `SELECT * FROM members WHERE id = ? AND membership_status = 'active'`,
+      `SELECT * FROM members WHERE id = ? AND current_status = 'active'`,
       [memberId]
     );
 
@@ -348,7 +348,7 @@ gymApiRouter.post("/test-membership", async (req, res, next) => {
       const expirationDate = new Date(startDate.getTime() + 2 * 60 * 1000);
       
       await conn.query(
-        "UPDATE members SET membership_status = 'active', start_date = ?, expiration_date = ?, current_plan = ? WHERE id = ?",
+        "UPDATE members SET current_status = 'active', start_date = ?, expiration_date = ?, current_plan = ? WHERE id = ?",
         [startDate, expirationDate, plan.plan_name, member_id]
       );
       
@@ -401,7 +401,7 @@ gymApiRouter.post("/process-expirations", async (req, res, next) => {
   try {
     // Update expired memberships
     const [result] = await db.query(
-      "UPDATE members SET membership_status = 'expired' WHERE expiration_date < NOW() AND membership_status = 'active'"
+      "UPDATE members SET current_status = 'expired' WHERE expiration_date < NOW() AND current_status = 'active'"
     );
     
     return res.json({
