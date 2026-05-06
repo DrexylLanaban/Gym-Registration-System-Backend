@@ -108,7 +108,7 @@ gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Valid member ID required" });
     }
 
-    // Use direct SQL query for real-time status without non-existent columns
+    // Use direct SQL query for real-time status with balance included
     const [results] = await db.query(
       `SELECT m.*, 
               CASE 
@@ -147,7 +147,8 @@ gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
         remaining_minutes: member.remaining_minutes || 0,
         remaining_seconds: member.remaining_seconds || 0,
         user_type: member.user_type,
-        membership_status: member.membership_status
+        membership_status: member.membership_status,
+        balance: member.balance || 0.00
       },
       message: "Membership status retrieved successfully"
     });
@@ -193,6 +194,16 @@ gymApiRouter.post("/memberships/activate", async (req, res, next) => {
     try {
       await conn.beginTransaction();
       
+      // Check balance if payment_method is 'balance'
+      if (payment_method === 'balance') {
+        const [rows] = await conn.query("SELECT balance FROM members WHERE id = ?", [actualMemberId]);
+        if (rows.length === 0 || rows[0].balance < amount) {
+          throw new Error("Insufficient balance. You need " + amount + " PHP.");
+        }
+        // Deduct balance
+        await conn.query("UPDATE members SET balance = balance - ? WHERE id = ?", [amount, actualMemberId]);
+      }
+
       // Create payment record without plan_id column
       const [paymentResult] = await conn.query(
         "INSERT INTO payments (member_id, amount, payment_method, processed_by, status) VALUES (?, ?, ?, ?, ?)",

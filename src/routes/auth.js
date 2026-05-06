@@ -182,9 +182,10 @@ async function handleAuthRegister(req, res, next) {
       const conn = await db.getConnection();
       try {
         await conn.beginTransaction();
+        // 1. Create member record first with 5 PHP balance
         const [mResult] = await conn.query(
-          "INSERT INTO members (full_name, phone, email, status) VALUES (?, ?, ?, ?)",
-          [nameStr, phoneStr, emailNorm, "active"]
+          "INSERT INTO members (full_name, phone, email, balance, current_status) VALUES (?, ?, ?, ?, ?)",
+          [nameStr, phoneStr, emailNorm, 5.00, 'inactive']
         );
         const memberId = mResult.insertId;
         const [uResult] = await conn.query(
