@@ -108,11 +108,20 @@ gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
       return res.status(400).json({ success: false, message: "Valid member ID required" });
     }
 
-    // Use direct SQL query for real-time status
+    // Use direct SQL query for real-time status without JOIN to non-existent table
     const [results] = await db.query(
-      `SELECT m.*, mp.plan_name, mp.price as plan_price 
+      `SELECT m.*, 
+              CASE 
+                WHEN m.membership_status = 'active' AND m.expiration_date > NOW() 
+                THEN TIMESTAMPDIFF(MINUTE, NOW(), m.expiration_date)
+                ELSE 0 
+              END as remaining_minutes,
+              CASE 
+                WHEN m.expiration_date IS NOT NULL 
+                THEN m.expiration_date 
+                ELSE NULL 
+              END as expiration_date
        FROM members m 
-       LEFT JOIN membership_plans mp ON m.current_plan = mp.plan_name 
        WHERE m.id = ?`,
       [memberId]
     );
@@ -178,19 +187,25 @@ gymApiRouter.post("/memberships/activate", async (req, res, next) => {
     try {
       await conn.beginTransaction();
       
-      // Create payment record
+      // Create payment record without plan_id column
       const [paymentResult] = await conn.query(
-        "INSERT INTO payments (member_id, plan_id, amount, payment_method, processed_by, status) VALUES (?, ?, ?, ?, ?, ?)",
-        [actualMemberId, plan_id, amount, payment_method || 'system', 'system', 'confirmed']
+        "INSERT INTO payments (member_id, amount, payment_method, processed_by, status) VALUES (?, ?, ?, ?, ?)",
+        [actualMemberId, amount, payment_method || 'system', 'system', 'confirmed']
       );
       
       // Update member membership
       const startDate = new Date();
       const expirationDate = new Date(startDate.getTime() + finalDuration * 60 * 1000);
       
+      // Get plan name from static data
+      let planName = 'Unknown Plan';
+      if (plan_id === 1) planName = 'TRIAL AWAKENING';
+      else if (plan_id === 2) planName = 'STANDARD MONTHLY';
+      else if (plan_id === 3) planName = 'ELITE ANNUAL';
+      
       await conn.query(
-        "UPDATE members SET membership_status = 'active', start_date = ?, expiration_date = ?, current_plan = (SELECT plan_name FROM membership_plans WHERE id = ?) WHERE id = ?",
-        [startDate, expirationDate, plan_id, actualMemberId]
+        "UPDATE members SET membership_status = 'active', start_date = ?, expiration_date = ?, current_plan = ? WHERE id = ?",
+        [startDate, expirationDate, planName, actualMemberId]
       );
       
       await conn.commit();
@@ -310,24 +325,22 @@ gymApiRouter.post("/test-membership", async (req, res, next) => {
       return res.status(400).json({ success: false, message: "member_id is required" });
     }
 
-    // Get the 2-minute test plan
-    const [planRows] = await db.query("SELECT * FROM membership_plans WHERE plan_name = 'Test 2-Minute' AND is_active = TRUE");
-    
-    if (planRows.length === 0) {
-      return res.status(404).json({ success: false, message: "Test plan not found" });
-    }
-
-    const plan = planRows[0];
+    // Use static test plan data since table doesn't exist
+    const plan = {
+      id: 0,
+      plan_name: 'Test 2-Minute',
+      price: 1.00
+    };
 
     // Activate 2-minute membership using direct SQL
     const conn = await db.getConnection();
     try {
       await conn.beginTransaction();
       
-      // Create payment record
+      // Create payment record without plan_id
       await conn.query(
-        "INSERT INTO payments (member_id, plan_id, amount, payment_method, processed_by, status) VALUES (?, ?, ?, ?, ?, ?)",
-        [member_id, plan.id, plan.price, 'system', 'system', 'confirmed']
+        "INSERT INTO payments (member_id, amount, payment_method, processed_by, status) VALUES (?, ?, ?, ?, ?)",
+        [member_id, plan.price, 'system', 'system', 'confirmed']
       );
       
       // Update member membership (2 minutes = 120 seconds)
@@ -423,11 +436,11 @@ gymApiRouter.post("/payments", async (req, res, next) => {
 
     const member = memberRows[0];
     
-    // Create payment record
+    // Create payment record without plan_id column
     const [paymentResult] = await db.query(
-      `INSERT INTO payments (member_id, plan_id, amount, payment_method, notes, processed_by, status) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [member_id, plan_id, amount, payment_method || 'cash', notes || '', processed_by || 'admin', 'confirmed']
+      `INSERT INTO payments (member_id, amount, payment_method, notes, processed_by, status) 
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [member_id, amount, payment_method || 'cash', notes || '', processed_by || 'admin', 'confirmed']
     );
 
     const paymentId = paymentResult.insertId;
@@ -436,9 +449,11 @@ gymApiRouter.post("/payments", async (req, res, next) => {
     // Update payment with receipt number
     await db.query("UPDATE payments SET receipt_number = ? WHERE id = ?", [receiptNumber, paymentId]);
 
-    // Get plan details
-    const [planRows] = await db.query("SELECT * FROM membership_plans WHERE id = ?", [plan_id]);
-    const plan = planRows[0] || {};
+    // Get plan name from static data
+    let planName = 'Unknown Plan';
+    if (plan_id === 1) planName = 'TRIAL AWAKENING';
+    else if (plan_id === 2) planName = 'STANDARD MONTHLY';
+    else if (plan_id === 3) planName = 'ELITE ANNUAL';
     
     return res.json({
       success: true,
@@ -446,8 +461,7 @@ gymApiRouter.post("/payments", async (req, res, next) => {
         id: paymentId,
         member_id: member_id,
         member_name: member.full_name,
-        plan_id: plan_id,
-        plan_name: plan.plan_name || 'Unknown Plan',
+        plan_name: planName,
         amount: Number(amount),
         payment_method: payment_method || 'cash',
         notes: notes || '',
@@ -550,9 +564,8 @@ gymApiRouter.get("/my-payments", async (req, res, next) => {
     const memberId = userRows[0].member_id;
     
     const [payments] = await db.query(
-      `SELECT p.*, mp.plan_name 
+      `SELECT p.*, '' as plan_name 
        FROM payments p
-       LEFT JOIN membership_plans mp ON p.plan_id = mp.id
        WHERE p.member_id = ?
        ORDER BY p.created_at DESC`,
       [memberId]
