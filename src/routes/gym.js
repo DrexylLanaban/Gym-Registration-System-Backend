@@ -147,6 +147,8 @@ gymApiRouter.post("/memberships/activate", async (req, res, next) => {
   try {
     const { member_id, user_id, plan_id, amount, payment_method, duration_minutes } = req.body || {};
     
+    console.log('Membership activation request body:', req.body);
+    
     // Accept either member_id or user_id
     let actualMemberId = member_id;
     if (!actualMemberId && user_id) {
@@ -162,8 +164,11 @@ gymApiRouter.post("/memberships/activate", async (req, res, next) => {
     }
 
     // Use stored procedure with custom duration support
+    const finalDuration = duration_minutes || 43200;
+    console.log('Final duration:', finalDuration, 'Type:', typeof finalDuration);
+    
     const [results] = await db.query("CALL ActivateMembership(?, ?, ?, ?, ?, ?)", [
-      actualMemberId, plan_id, amount, payment_method || 'system', 'system', duration_minutes || 43200
+      actualMemberId, plan_id, amount, payment_method || 'system', 'system', finalDuration
     ]);
     
     if (results.length === 0) {
