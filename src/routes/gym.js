@@ -100,48 +100,33 @@ gymApiRouter.get("/membership-plans", (req, res) => {
   }
 });
 
-/** GET /api/membership-status/:id — FIXED */
+/** GET /api/membership-status/:id — TIMER SUPPORT */
 gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
   try {
     const memberId = req.params.id;
-    const [results] = await db.query("SELECT * FROM members WHERE id = ?", [memberId]);
+    const [results] = await db.query(
+      "SELECT m.current_plan AS membership_plan, m.current_status AS status, m.wallet_balance, TIMESTAMPDIFF(SECOND, NOW(), m.expiration_date) AS remaining_seconds FROM members m WHERE m.id = ?",
+      [memberId]
+    );
     
     if (results.length === 0) return res.status(404).json({ success: false, message: "Member not found" });
 
     const member = results[0];
-    const now = new Date();
-    const expiration = member.expiration_date ? new Date(member.expiration_date) : null;
     
-    // Logic: If active but time ran out, it's expired. If no date, it's inactive.
-    let status = member.current_status || 'inactive';
-    let display = member.display_status || 'INACTIVE';
-    
-    if (status === 'active' && expiration && now > expiration) {
-      status = 'expired';
-      display = 'EXPIRED';
-    } else if (!expiration && status !== 'active') {
-      status = 'inactive';
-      display = 'INACTIVE';
+    // If remaining_seconds is <= 0, backend should automatically return status: 'expired'
+    if (member.remaining_seconds <= 0) {
+      member.status = 'expired';
     }
 
     return res.json({
       success: true,
-      data: {
-        id: member.id,
-        full_name: member.full_name,
-        current_status: status,
-        display_status: display,
-        balance: Number(member.balance || 0), // THIS IS WHAT THE APP NEEDS
-        wallet_balance: Number(member.balance || 0), 
-        expiration_date: member.expiration_date,
-        remaining_minutes: (expiration && expiration > now) ? Math.floor((expiration - now) / 60000) : 0
-      },
+      data: member,
       message: "Status retrieved"
     });
   } catch (err) { next(err); }
 });
 
-/** POST /api/memberships/activate — FIXED */
+/** POST /api/memberships/activate — 3-STEP TRANSACTION */
 gymApiRouter.post("/memberships/activate", async (req, res, next) => {
   try {
     const { member_id, amount, plan_id, duration_minutes, payment_method } = req.body;
@@ -150,31 +135,34 @@ gymApiRouter.post("/memberships/activate", async (req, res, next) => {
     try {
       await conn.beginTransaction();
 
-      // 1. Check and deduct balance (The "Temple Wallet" logic)
-      const [m] = await conn.query("SELECT balance FROM members WHERE id = ?", [member_id]);
-      const currentBalance = m[0] ? Number(m[0].balance) : 0;
-
-      if (currentBalance < amount) {
-        throw new Error(`Insufficient balance. You have ₱${currentBalance}`);
-      }
-
-      await conn.query("UPDATE members SET balance = balance - ? WHERE id = ?", [amount, member_id]);
-
-      // 2. Calculate time
-      const minutes = duration_minutes || 2880; // 2 days default
-      const startDate = new Date();
-      const expirationDate = new Date(startDate.getTime() + minutes * 60000);
-      
-      let planName = plan_id === 1 ? 'TRIAL' : 'STANDARD';
-
-      // 3. Update Member Status
+      // STEP A: Create Payment Record
+      const receiptNumber = `RCP${Date.now()}`;
       await conn.query(
-        "UPDATE members SET current_status = 'active', display_status = 'ACTIVE', start_date = ?, expiration_date = ?, current_plan = ? WHERE id = ?",
-        [startDate, expirationDate, planName, member_id]
+        "INSERT INTO payments (member_id, amount, payment_method, status, description, payment_date, plan_id, receipt_number) VALUES (?, ?, 'Wallet', 'paid', 'Membership Purchase', NOW(), ?, ?)",
+        [member_id, amount, plan_id, receiptNumber]
+      );
+
+      // STEP B: Create Membership Record
+      const planName = plan_id === 1 ? 'TRIAL' : 'STANDARD';
+      const minutes = duration_minutes || 2; // 2 minutes for trial
+      await conn.query(
+        "INSERT INTO memberships (member_id, plan_name, start_date, end_date, status, price) VALUES (?, ?, NOW(), DATE_ADD(NOW(), INTERVAL ? MINUTE), 'active', ?)",
+        [member_id, planName, minutes, amount]
+      );
+
+      // STEP C: Sync to Members Table (Crucial for App Timer)
+      await conn.query(
+        "UPDATE members SET current_plan = ?, current_status = 'active', display_status = 'ACTIVE', start_date = NOW(), expiration_date = DATE_ADD(NOW(), INTERVAL ? MINUTE) WHERE id = ?",
+        [planName, minutes, member_id]
       );
 
       await conn.commit();
-      res.json({ success: true, message: "Activated!", balance: currentBalance - amount });
+      res.json({ 
+        success: true, 
+        message: "Activated!", 
+        receipt_number: receiptNumber,
+        balance: 0 // Will be updated in next status call
+      });
 
     } catch (err) {
       await conn.rollback();
