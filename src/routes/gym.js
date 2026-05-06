@@ -130,7 +130,7 @@ gymApiRouter.get("/membership-status/:id", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/** POST /api/memberships/activate — 3-STEP TRANSACTION */
+/** POST /api/memberships/activate — PERSISTENT WALLET SYSTEM */
 gymApiRouter.post("/memberships/activate", async (req, res, next) => {
   try {
     const { member_id, amount, plan_id, duration_minutes, payment_method } = req.body;
@@ -138,6 +138,12 @@ gymApiRouter.post("/memberships/activate", async (req, res, next) => {
     
     try {
       await conn.beginTransaction();
+
+      // CORE WALLET RULE: Deduct Balance (Purchase / Trial / Payment)
+      await conn.query(
+        "UPDATE members SET wallet_balance = wallet_balance - ? WHERE id = ?",
+        [amount, member_id]
+      );
 
       // STEP A: Create Payment Record
       const receiptNumber = `RCP${Date.now()}`;
@@ -161,11 +167,16 @@ gymApiRouter.post("/memberships/activate", async (req, res, next) => {
       );
 
       await conn.commit();
+      
+      // Get updated balance to return
+      const [balanceResult] = await conn.query("SELECT wallet_balance FROM members WHERE id = ?", [member_id]);
+      const newBalance = balanceResult[0] ? Number(balanceResult[0].wallet_balance) : 0;
+
       res.json({ 
         success: true, 
         message: "Activated!", 
         receipt_number: receiptNumber,
-        balance: 0 // Will be updated in next status call
+        balance: newBalance // PERSISTENT BALANCE - NO RESETS
       });
 
     } catch (err) {
