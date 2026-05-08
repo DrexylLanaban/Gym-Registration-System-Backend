@@ -574,10 +574,32 @@ gymApiRouter.get("/schedules", async (req, res, next) => {
 /** POST /api/add_schedule — Create workout schedule */
 gymApiRouter.post("/add_schedule", async (req, res, next) => {
   try {
+    console.log('POST /api/add_schedule request body:', req.body);
+    
     const { member_id, trainer_id, day_of_week, exercise_name, sets, reps, weight } = req.body;
     
-    if (!member_id || !exercise_name || !day_of_week) {
-      return res.status(400).json({ success: false, message: "member_id, exercise_name, and day_of_week are required" });
+    // Explicit validation for member_id
+    if (!member_id) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "member_id is required" 
+      });
+    }
+    
+    if (!exercise_name || !day_of_week) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "exercise_name and day_of_week are required" 
+      });
+    }
+    
+    // Verify member exists before creating schedule
+    const [memberCheck] = await db.query("SELECT id FROM members WHERE id = ?", [member_id]);
+    if (memberCheck.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Invalid member_id: member does not exist" 
+      });
     }
     
     const [result] = await db.query(
@@ -585,14 +607,19 @@ gymApiRouter.post("/add_schedule", async (req, res, next) => {
       [member_id, trainer_id, day_of_week, exercise_name, sets || 0, reps || 0, weight || '']
     );
     
-    return res.json({
+    console.log('Workout schedule created with ID:', result.insertId, 'for member_id:', member_id);
+    
+    return res.status(201).json({
       success: true,
-      data: { id: result.insertId },
+      data: { id: result.insertId, member_id: member_id },
       message: "Workout schedule created successfully"
     });
   } catch (err) {
     console.error('Add schedule error:', err);
-    return next(err);
+    return res.status(500).json({ 
+      success: false, 
+      message: "Failed to create workout schedule: " + err.message 
+    });
   }
 });
 
